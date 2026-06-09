@@ -12,6 +12,8 @@
   "observability": {
     "enabled": true
   },
+  // Keep only non-secret variables here. Secrets belong in Cloudflare Dashboard
+  // and local .dev.vars, never in committed Wrangler config.
   "vars": {
     "APP_ENV": "production",
     "TURNSTILE_SITE_KEY": ""
