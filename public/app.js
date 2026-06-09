@@ -45,7 +45,10 @@ const USER_COPY = {
     openingCopy: '链接正在读取。',
     unavailable: '已归零。',
     cannotOpen: '没有可读取的内容。',
-    openedTitle: '消息',
+    openedEyebrow: 'Burn0 · 已打开',
+    openedTitle: '消息内容',
+    openedLede: '内容只在当前窗口显示，关闭后可能无法再次读取。',
+    openedBurned: '本次打开后，这条链接已归零。',
     burnedTitle: '已归零',
     burnedCopy: '内容已归零，不再显示。',
     expiredCopy: '时间已归零，不再显示。',
@@ -121,7 +124,10 @@ const USER_COPY = {
     openingCopy: 'Reading the link.',
     unavailable: 'Returned to zero.',
     cannotOpen: 'This link can no longer be opened.',
-    openedTitle: 'Message',
+    openedEyebrow: 'Burn0 · Opened',
+    openedTitle: 'Message content',
+    openedLede: 'This content is only shown in this window and may not be readable again.',
+    openedBurned: 'This link returned to zero after this open.',
     burnedTitle: 'Returned to zero',
     burnedCopy: 'No readable content remains here.',
     expiredCopy: 'Time ran out. The content returned to zero.',
@@ -446,21 +452,25 @@ async function openMessage(id, panel) {
 
   try {
     const opened = await api(`/api/messages/${encodeURIComponent(id)}/open`, { method: 'POST' });
-    renderOpenedMessage(panel, id, opened.text);
+    renderOpenedMessage(panel, id, opened);
   } catch (error) {
     renderZeroState(panel, error.status || error.message);
   }
 }
 
-function renderOpenedMessage(panel, id, text) {
+function renderOpenedMessage(panel, id, message) {
   const copy = t();
+  const text = message.text || '';
+  panel.classList.add('opened-message');
   panel.innerHTML = `
-    <p class="eyebrow">Burn0</p>
-    <h1>${copy.openedTitle}</h1>
-    <div class="message-body">${escapeHtml(text)}</div>
-    <div class="action-row">
+    <div class="message-heading">
+      <p class="eyebrow">${copy.openedEyebrow}</p>
+      <p class="message-copy">${escapeHtml(openedMessageSummary(message))}</p>
+    </div>
+    <article class="message-body" aria-label="${copy.openedTitle}">${escapeHtml(text)}</article>
+    <div class="action-row message-actions">
+      <a class="secondary-button" href="/">${copy.createAnother}</a>
       <button class="ghost-button" type="button" id="toggleReport">${copy.reportLink}</button>
-      <a class="ghost-button" href="/">${copy.createAnother}</a>
     </div>
     ${reportBox(id)}
   `;
@@ -664,6 +674,15 @@ function limitSummary(message) {
   }
 
   return copy.burnedCopy;
+}
+
+function openedMessageSummary(message) {
+  const copy = t();
+  if (message.burned) {
+    return copy.openedBurned;
+  }
+
+  return copy.openedLede;
 }
 
 async function getPublicConfig() {
