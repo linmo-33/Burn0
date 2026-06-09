@@ -145,7 +145,6 @@ export default {
       }
 
       if (url.pathname.startsWith('/api/')) {
-        await ensureDatabase(env);
         return await handleApi(request, env, ctx, url);
       }
 
@@ -237,6 +236,12 @@ async function handleApi(request, env, ctx, url) {
     });
   }
 
+  if (request.method === 'POST' && pathname === '/api/admin/logout') {
+    return adminLogout();
+  }
+
+  await ensureDatabase(env);
+
   if (request.method === 'POST' && pathname === '/api/messages') {
     return await createMessage(request, env, url);
   }
@@ -264,10 +269,6 @@ async function handleApi(request, env, ctx, url) {
 
   if (request.method === 'POST' && pathname === '/api/admin/login') {
     return await adminLogin(request, env);
-  }
-
-  if (request.method === 'POST' && pathname === '/api/admin/logout') {
-    return adminLogout();
   }
 
   if (pathname.startsWith('/api/admin/')) {
@@ -1797,6 +1798,10 @@ function publicAdmin(admin) {
 
 function handleError(error, env) {
   const status = error.status || 500;
+  if (status >= 500) {
+    console.error(error?.stack || error);
+  }
+
   const payload = {
     error: error.code || 'internal_error',
     message: status >= 500 ? 'Internal server error.' : error.message
