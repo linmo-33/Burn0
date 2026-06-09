@@ -12,11 +12,10 @@
   "observability": {
     "enabled": true
   },
-  // Keep only non-secret variables here. Secrets belong in Cloudflare Dashboard
-  // and local .dev.vars, never in committed Wrangler config.
+  // Keep only stable non-secret defaults here. Dashboard-managed variables
+  // and secrets belong in Cloudflare Dashboard and local .dev.vars.
   "vars": {
-    "APP_ENV": "production",
-    "TURNSTILE_SITE_KEY": ""
+    "APP_ENV": "production"
   },
   "d1_databases": [
     {

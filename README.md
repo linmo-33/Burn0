@@ -59,7 +59,7 @@ Fork 本仓库到自己的 GitHub 账号。
 | 变量名 | 类型 | 说明 |
 |---|---|---|
 | `APP_ENV` | Text | 填写 `production` |
-| `TURNSTILE_SITE_KEY` | Text | Turnstile Site Key，可为空 |
+| `TURNSTILE_SITE_KEY` | Text | Turnstile Site Key，可选。启用 Turnstile 时填写 |
 | `CONTENT_ENCRYPTION_KEY` | Secret | 消息内容加密密钥 |
 | `IP_HASH_SECRET` | Secret | 来源 IP/User-Agent 哈希盐 |
 | `ADMIN_USERNAME` | Secret | 管理员账号 |
@@ -69,9 +69,9 @@ Fork 本仓库到自己的 GitHub 账号。
 
 `CONTENT_ENCRYPTION_KEY` 和 `IP_HASH_SECRET` 上线后应保持稳定，否则历史消息解密和来源哈希匹配会受到影响。
 
-Cloudflare 控制台保存变量时，可能会提示把变更同步到 Wrangler 配置文件。这个项目只建议同步非敏感的 **Text** 变量，例如 `APP_ENV` 和 `TURNSTILE_SITE_KEY`；所有 **Secret** 都不要写入 `wrangler.jsonc`，生产环境在 Cloudflare Dashboard 中保存，本地开发写入 `.dev.vars`。
+Cloudflare 控制台保存变量时，可能会提示把变更同步到 Wrangler 配置文件。这个项目只在 `wrangler.jsonc` 中保留稳定默认值 `APP_ENV=production`；`TURNSTILE_SITE_KEY` 建议只在 Cloudflare Dashboard 中配置，避免后续代码部署把控制台里的值覆盖为空。所有 **Secret** 都不要写入 `wrangler.jsonc`，生产环境在 Cloudflare Dashboard 中保存，本地开发写入 `.dev.vars`。
 
-如果你 fork 后只通过 Cloudflare Dashboard 部署，不需要修改仓库里的 `wrangler.jsonc`。仓库中的 `TURNSTILE_SITE_KEY` 默认留空，实际值可以直接在 Cloudflare 控制台配置。
+如果你 fork 后只通过 Cloudflare Dashboard 部署，通常不需要修改仓库里的 `wrangler.jsonc`。
 
 #### 5. 绑定 D1 数据库
 
