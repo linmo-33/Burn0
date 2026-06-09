@@ -1375,7 +1375,7 @@ async function assertSourceAllowed(env, metadata) {
 }
 
 async function requestMetadata(request, env) {
-  const ip = request.headers.get('cf-connecting-ip') || request.headers.get('x-forwarded-for') || '0.0.0.0';
+  const ip = preferredClientIp(request.headers);
   const userAgent = request.headers.get('user-agent') || 'unknown';
   const ipHash = await stableHash(ip, env);
   const userAgentHash = await stableHash(userAgent, env);
@@ -1387,6 +1387,69 @@ async function requestMetadata(request, env) {
     userAgentHash,
     userAgentSummary: summarizeUserAgent(userAgent)
   };
+}
+
+function preferredClientIp(headers) {
+  const candidates = [
+    ...ipHeaderCandidates(headers.get('cf-connecting-ip')),
+    ...ipHeaderCandidates(headers.get('x-forwarded-for'))
+  ];
+
+  // 来源展示和封禁优先使用 IPv4；没有 IPv4 时保留 IPv6，避免 IPv6-only 访问失去来源信息。
+  return candidates.find(isIpv4Address) || candidates[0] || '0.0.0.0';
+}
+
+function ipHeaderCandidates(value) {
+  if (!value) {
+    return [];
+  }
+
+  return value
+    .split(',')
+    .map(normalizeIpCandidate)
+    .filter(Boolean);
+}
+
+function normalizeIpCandidate(value) {
+  const candidate = String(value || '').trim();
+  if (!candidate) {
+    return '';
+  }
+
+  if (candidate.startsWith('[')) {
+    const bracketEnd = candidate.indexOf(']');
+    if (bracketEnd > 0) {
+      return candidate.slice(1, bracketEnd);
+    }
+  }
+
+  const mappedIpv4 = candidate.match(/::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
+  if (mappedIpv4) {
+    return mappedIpv4[1];
+  }
+
+  const ipv4WithPort = candidate.match(/^(\d{1,3}(?:\.\d{1,3}){3}):\d+$/);
+  if (ipv4WithPort) {
+    return ipv4WithPort[1];
+  }
+
+  return candidate;
+}
+
+function isIpv4Address(value) {
+  const parts = String(value || '').split('.');
+  if (parts.length !== 4) {
+    return false;
+  }
+
+  return parts.every((part) => {
+    if (!/^\d+$/.test(part)) {
+      return false;
+    }
+
+    const number = Number(part);
+    return number >= 0 && number <= 255;
+  });
 }
 
 async function verifyTurnstile(token, env, ip) {

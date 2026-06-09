@@ -955,6 +955,18 @@ tr:last-child td {
   text-align: left;
 }
 
+.admin-table td.source-cell,
+.kv-grid dd.source-cell {
+  white-space: normal;
+}
+
+.source-ip {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .table-actions {
   display: flex;
   flex-wrap: wrap;

@@ -578,7 +578,7 @@ async function renderReports() {
                   ${report.details ? `<span class="meta table-summary" title="${escapeAttr(report.details)}">${escapeHtml(report.details)}</span>` : ''}
                 </div>
               </td>
-              <td>${escapeHtml(report.reporterIp || '')}</td>
+              <td class="source-cell">${sourceIpDisplay(report.reporterIp)}</td>
               <td>${formatDate(report.created_at)}</td>
               <td>${formatViews(report.view_count, report.max_views)}</td>
               <td>${reportActions(report, copy)}</td>
@@ -792,7 +792,7 @@ async function openMessageDrawer(messageId) {
         <dt>${copy.fields.opened}</dt><dd>${formatDate(message.openedAt)}</dd>
         <dt>${copy.fields.burned}</dt><dd>${formatDate(message.burnedAt)}</dd>
         <dt>${copy.fields.reports}</dt><dd>${message.reportCount}</dd>
-        <dt>${copy.fields.ip}</dt><dd>${escapeHtml(message.creatorIp || '')}</dd>
+        <dt>${copy.fields.ip}</dt><dd class="source-cell">${sourceIpDisplay(message.creatorIp)}</dd>
         <dt>${copy.fields.userAgent}</dt><dd>${escapeHtml(message.userAgentSummary || '')}</dd>
         <dt>${copy.fields.quarantine}</dt><dd>${escapeHtml(message.quarantineReason || '')}</dd>
         <dt>${copy.fields.delete}</dt><dd>${escapeHtml(message.deleteReason || '')}</dd>
@@ -971,7 +971,7 @@ function messageRow(message) {
       <td>${formatDate(message.createdAt)}</td>
       <td>${formatDate(message.expiresAt)}</td>
       <td>${message.reportCount}</td>
-      <td><span class="meta">${escapeHtml(message.creatorIp || '')}</span></td>
+      <td class="source-cell">${sourceIpDisplay(message.creatorIp, 'meta')}</td>
       <td><button class="secondary-button" data-open-message="${escapeAttr(message.id)}" type="button">${copy.view}</button></td>
     </tr>
   `;
@@ -1023,6 +1023,12 @@ function formatBurnMode(mode) {
 function formatReportReason(reason) {
   const labels = tr().reportReasons || {};
   return labels[reason] || reason || '—';
+}
+
+function sourceIpDisplay(value, extraClass = '') {
+  const ip = value || '';
+  const classes = ['source-ip', extraClass].filter(Boolean).join(' ');
+  return `<span class="${classes}" title="${escapeAttr(ip)}">${escapeHtml(ip)}</span>`;
 }
 
 function reportDetailList(rows) {
