@@ -10,8 +10,15 @@
     "run_worker_first": ["/api/*"]
   },
   "observability": {
-    "enabled": true
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": false
+    }
   },
+  "keep_vars": true,
   // Keep only stable non-secret defaults here. Dashboard-managed variables
   // and secrets belong in Cloudflare Dashboard and local .dev.vars.
   "vars": {

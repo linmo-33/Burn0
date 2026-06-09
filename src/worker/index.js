@@ -207,11 +207,6 @@ async function ensureDatabase(env) {
 
 async function initializeDatabase(env) {
   // Empty D1 databases from forked deployments are prepared on the first API request.
-  if (typeof env.DB.exec === 'function') {
-    await env.DB.exec(DATABASE_SCHEMA);
-    return;
-  }
-
   for (const statement of DATABASE_SCHEMA.split(';').map((part) => part.trim()).filter(Boolean)) {
     await env.DB.prepare(statement).run();
   }

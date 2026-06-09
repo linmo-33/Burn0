@@ -69,7 +69,7 @@ Fork 本仓库到自己的 GitHub 账号。
 
 `CONTENT_ENCRYPTION_KEY` 和 `IP_HASH_SECRET` 上线后应保持稳定，否则历史消息解密和来源哈希匹配会受到影响。
 
-Cloudflare 控制台保存变量时，可能会提示把变更同步到 Wrangler 配置文件。这个项目只在 `wrangler.jsonc` 中保留稳定默认值 `APP_ENV=production`；`TURNSTILE_SITE_KEY` 建议只在 Cloudflare Dashboard 中配置，避免后续代码部署把控制台里的值覆盖为空。所有 **Secret** 都不要写入 `wrangler.jsonc`，生产环境在 Cloudflare Dashboard 中保存，本地开发写入 `.dev.vars`。
+Cloudflare 控制台保存变量时，可能会提示把变更同步到 Wrangler 配置文件。这个项目开启了 `keep_vars`，部署时会保留 Cloudflare Dashboard 中已有的 Text 变量；`wrangler.jsonc` 中只保留稳定默认值 `APP_ENV=production`。`TURNSTILE_SITE_KEY` 建议只在 Cloudflare Dashboard 中配置，所有 **Secret** 都不要写入 `wrangler.jsonc`，生产环境在 Cloudflare Dashboard 中保存，本地开发写入 `.dev.vars`。
 
 如果你 fork 后只通过 Cloudflare Dashboard 部署，通常不需要修改仓库里的 `wrangler.jsonc`。
 
