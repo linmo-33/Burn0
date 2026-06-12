@@ -35,7 +35,7 @@ const requiredTables = [
   'message_events',
   'reports',
   'admin_users',
-  'admin_audit_logs',
+  'app_settings',
   'blocked_sources',
   'rate_limit_events'
 ];

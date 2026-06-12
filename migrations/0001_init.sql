@@ -75,21 +75,11 @@ CREATE TABLE IF NOT EXISTS admin_users (
 
 CREATE INDEX IF NOT EXISTS idx_admin_users_email ON admin_users(email);
 
-CREATE TABLE IF NOT EXISTS admin_audit_logs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  admin_id TEXT NOT NULL,
-  action TEXT NOT NULL,
-  target_type TEXT NOT NULL,
-  target_id TEXT NOT NULL,
-  reason TEXT,
-  ip_hash TEXT,
-  ip_ciphertext TEXT,
-  user_agent_summary TEXT,
-  created_at TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
-
-CREATE INDEX IF NOT EXISTS idx_admin_audit_admin ON admin_audit_logs(admin_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_admin_audit_target ON admin_audit_logs(target_type, target_id, created_at);
 
 CREATE TABLE IF NOT EXISTS blocked_sources (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

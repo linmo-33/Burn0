@@ -5,6 +5,9 @@ const DEFAULT_EXPIRY_SECONDS = 24 * 60 * 60;
 const MAX_VIEW_LIMIT = 20;
 const ADMIN_COOKIE_NAME = 'burn0_admin';
 const ADMIN_SESSION_SECONDS = 8 * 60 * 60;
+const CLEANUP_DEFAULT_INTERVAL_HOURS = 24;
+const CLEANUP_DEFAULT_RETENTION_DAYS = 30;
+const CLEANUP_BATCH_SIZE = 100;
 const STATUS_PUBLIC_COPY = {
   burned: 'This content has returned to zero.',
   expired: 'This content has expired.',
@@ -90,21 +93,11 @@ CREATE TABLE IF NOT EXISTS admin_users (
 
 CREATE INDEX IF NOT EXISTS idx_admin_users_email ON admin_users(email);
 
-CREATE TABLE IF NOT EXISTS admin_audit_logs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  admin_id TEXT NOT NULL,
-  action TEXT NOT NULL,
-  target_type TEXT NOT NULL,
-  target_id TEXT NOT NULL,
-  reason TEXT,
-  ip_hash TEXT,
-  ip_ciphertext TEXT,
-  user_agent_summary TEXT,
-  created_at TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
-
-CREATE INDEX IF NOT EXISTS idx_admin_audit_admin ON admin_audit_logs(admin_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_admin_audit_target ON admin_audit_logs(target_type, target_id, created_at);
 
 CREATE TABLE IF NOT EXISTS blocked_sources (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -188,6 +181,7 @@ export class MessageGate {
 async function runScheduledTasks(env) {
   await ensureDatabase(env);
   await expireMessages(env);
+  await runMessageCleanupIfDue(env);
 }
 
 async function ensureDatabase(env) {
@@ -293,7 +287,7 @@ async function createMessage(request, env, url) {
   }
 
   const metadata = await requestMetadata(request, env);
-  await verifyTurnstile(body.turnstileToken, env, metadata.ip);
+  await verifyTurnstile(body.turnstileToken, env, metadata.verificationIp);
   await assertSourceAllowed(env, metadata);
 
   const messageId = randomId();
@@ -508,6 +502,20 @@ async function handleAdminApi(request, env, _ctx, url) {
     return await adminMetrics(env);
   }
 
+  if (request.method === 'GET' && pathname === '/api/admin/settings') {
+    return await adminSettings(env);
+  }
+
+  if (request.method === 'POST' && pathname === '/api/admin/settings') {
+    requirePermission(admin, 'owner');
+    return await adminUpdateSettings(request, env);
+  }
+
+  if (request.method === 'POST' && pathname === '/api/admin/settings/purge') {
+    requirePermission(admin, 'owner');
+    return await adminPurgeMessages(env);
+  }
+
   if (request.method === 'GET' && pathname === '/api/admin/messages') {
     return await adminListMessages(env, url);
   }
@@ -519,7 +527,7 @@ async function handleAdminApi(request, env, _ctx, url) {
 
   const detailMatch = pathname.match(/^\/api\/admin\/messages\/([^/]+)$/);
   if (request.method === 'GET' && detailMatch) {
-    return await adminGetMessage(request, env, admin, decodeURIComponent(detailMatch[1]), url);
+    return await adminGetMessage(env, admin, decodeURIComponent(detailMatch[1]));
   }
 
   const quarantineMatch = pathname.match(/^\/api\/admin\/messages\/([^/]+)\/quarantine$/);
@@ -546,7 +554,7 @@ async function handleAdminApi(request, env, _ctx, url) {
 
   if (request.method === 'POST' && pathname === '/api/admin/reports/batch-delete') {
     requirePermission(admin, 'moderate');
-    return await adminBatchDeleteReports(request, env, admin);
+    return await adminBatchDeleteReports(request, env);
   }
 
   const reviewReportMatch = pathname.match(/^\/api\/admin\/reports\/(\d+)\/(confirm|reject)$/);
@@ -568,15 +576,6 @@ async function handleAdminApi(request, env, _ctx, url) {
   if (request.method === 'POST' && liftBlockMatch) {
     requirePermission(admin, 'moderate');
     return await adminLiftBlockedSource(request, env, admin, Number(liftBlockMatch[1]));
-  }
-
-  if (request.method === 'GET' && pathname === '/api/admin/audit-logs') {
-    return await adminAuditLogs(env);
-  }
-
-  if (request.method === 'POST' && pathname === '/api/admin/audit-logs/batch-delete') {
-    requirePermission(admin, 'moderate');
-    return await adminBatchDeleteAuditLogs(request, env, admin);
   }
 
   throw httpError(404, 'not_found', 'Admin API route not found.');
@@ -633,6 +632,220 @@ async function adminMetrics(env) {
   }
 
   return jsonResponse({ metrics });
+}
+
+async function adminSettings(env) {
+  const cleanup = await readCleanupSettings(env);
+  const purgeable = await countPurgeableMessages(env, cleanup);
+  return jsonResponse({ cleanup, purgeable });
+}
+
+async function adminUpdateSettings(request, env) {
+  const body = await readJson(request);
+  const cleanup = body.cleanup || {};
+  const current = await readCleanupSettings(env);
+  const next = normalizeCleanupSettings({
+    enabled: cleanup.enabled ?? current.enabled,
+    intervalHours: cleanup.intervalHours ?? current.intervalHours,
+    retentionDays: cleanup.retentionDays ?? current.retentionDays,
+    lastRunAt: current.lastRunAt
+  });
+
+  await writeCleanupSettings(env, next);
+  return jsonResponse({ ok: true, cleanup: await readCleanupSettings(env) });
+}
+
+async function adminPurgeMessages(env) {
+  await expireMessages(env);
+  const cleanup = await readCleanupSettings(env);
+  const result = await purgeTerminalMessages(env, cleanup, { maxBatches: 10 });
+  await writeCleanupLastRun(env, result);
+  const nextCleanup = await readCleanupSettings(env);
+  return jsonResponse({
+    ok: true,
+    cleanup: nextCleanup,
+    purgeable: await countPurgeableMessages(env, nextCleanup),
+    result
+  });
+}
+
+async function runMessageCleanupIfDue(env) {
+  const cleanup = await readCleanupSettings(env);
+  if (!cleanup.enabled || !cleanupIsDue(cleanup)) {
+    return;
+  }
+
+  const result = await purgeTerminalMessages(env, cleanup, { maxBatches: 1 });
+  await writeCleanupLastRun(env, result);
+}
+
+async function readCleanupSettings(env) {
+  const rows = await env.DB.prepare(
+    `SELECT key, value
+       FROM app_settings
+      WHERE key IN (
+        'cleanup_enabled',
+        'cleanup_interval_hours',
+        'cleanup_retention_days',
+        'cleanup_last_run_at'
+      )`
+  ).all();
+  const values = {};
+  for (const row of rows.results || []) {
+    values[row.key] = row.value;
+  }
+
+  return normalizeCleanupSettings({
+    enabled: values.cleanup_enabled,
+    intervalHours: values.cleanup_interval_hours,
+    retentionDays: values.cleanup_retention_days,
+    lastRunAt: values.cleanup_last_run_at
+  });
+}
+
+function normalizeCleanupSettings(settings) {
+  return {
+    enabled: normalizeBoolean(settings.enabled, true),
+    intervalHours: clampInteger(settings.intervalHours, 1, 720, CLEANUP_DEFAULT_INTERVAL_HOURS),
+    retentionDays: clampInteger(settings.retentionDays, 1, 3650, CLEANUP_DEFAULT_RETENTION_DAYS),
+    lastRunAt: validIsoString(settings.lastRunAt) ? settings.lastRunAt : null
+  };
+}
+
+async function writeCleanupSettings(env, cleanup) {
+  await writeAppSetting(env, 'cleanup_enabled', cleanup.enabled ? '1' : '0');
+  await writeAppSetting(env, 'cleanup_interval_hours', String(cleanup.intervalHours));
+  await writeAppSetting(env, 'cleanup_retention_days', String(cleanup.retentionDays));
+}
+
+async function writeCleanupLastRun(env, result) {
+  await writeAppSetting(env, 'cleanup_last_run_at', result.ranAt);
+}
+
+async function writeAppSetting(env, key, value) {
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT INTO app_settings (key, value, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET
+       value = excluded.value,
+       updated_at = excluded.updated_at`
+  )
+    .bind(key, String(value), now)
+    .run();
+}
+
+function cleanupIsDue(cleanup, now = new Date()) {
+  if (!cleanup.lastRunAt) {
+    return true;
+  }
+
+  const lastRunTime = new Date(cleanup.lastRunAt).getTime();
+  if (Number.isNaN(lastRunTime)) {
+    return true;
+  }
+
+  return now.getTime() - lastRunTime >= cleanup.intervalHours * 60 * 60 * 1000;
+}
+
+async function countPurgeableMessages(env, cleanup) {
+  const cutoff = cleanupCutoffIso(cleanup);
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS count
+       FROM messages
+      WHERE status IN ('deleted', 'expired', 'burned')
+        AND COALESCE(deleted_at, expired_at, burned_at, created_at) <= ?`
+  )
+    .bind(cutoff)
+    .first();
+
+  return {
+    messages: Number(row?.count || 0),
+    cutoff
+  };
+}
+
+async function purgeTerminalMessages(env, cleanup, options = {}) {
+  const maxBatches = clampInteger(options.maxBatches, 1, 10, 1);
+  const ranAt = new Date().toISOString();
+  const cutoff = cleanupCutoffIso(cleanup, new Date(ranAt));
+  const total = {
+    messages: 0,
+    reports: 0,
+    events: 0,
+    batches: 0,
+    hasMore: false,
+    cutoff,
+    ranAt
+  };
+
+  for (let batchIndex = 0; batchIndex < maxBatches; batchIndex += 1) {
+    const batch = await purgeTerminalMessageBatch(env, cutoff);
+    if (!batch.messages) {
+      break;
+    }
+
+    total.messages += batch.messages;
+    total.reports += batch.reports;
+    total.events += batch.events;
+    total.batches += 1;
+
+    if (batch.messages < CLEANUP_BATCH_SIZE) {
+      break;
+    }
+
+    total.hasMore = batchIndex === maxBatches - 1;
+  }
+
+  return total;
+}
+
+async function purgeTerminalMessageBatch(env, cutoff) {
+  const rows = await env.DB.prepare(
+    `SELECT id
+       FROM messages
+      WHERE status IN ('deleted', 'expired', 'burned')
+        AND COALESCE(deleted_at, expired_at, burned_at, created_at) <= ?
+      ORDER BY COALESCE(deleted_at, expired_at, burned_at, created_at) ASC
+      LIMIT ?`
+  )
+    .bind(cutoff, CLEANUP_BATCH_SIZE)
+    .all();
+  const ids = (rows.results || []).map((row) => row.id).filter(Boolean);
+  if (!ids.length) {
+    return { messages: 0, reports: 0, events: 0 };
+  }
+
+  const placeholders = ids.map(() => '?').join(',');
+  const reportCount = await countRows(env, `SELECT COUNT(*) AS count FROM reports WHERE message_id IN (${placeholders})`, ids);
+  const eventCount = await countRows(env, `SELECT COUNT(*) AS count FROM message_events WHERE message_id IN (${placeholders})`, ids);
+
+  await env.DB.prepare(`DELETE FROM reports WHERE message_id IN (${placeholders})`)
+    .bind(...ids)
+    .run();
+  await env.DB.prepare(`DELETE FROM message_events WHERE message_id IN (${placeholders})`)
+    .bind(...ids)
+    .run();
+  await env.DB.prepare(`DELETE FROM messages WHERE id IN (${placeholders})`)
+    .bind(...ids)
+    .run();
+
+  return {
+    messages: ids.length,
+    reports: reportCount,
+    events: eventCount
+  };
+}
+
+async function countRows(env, sql, binds) {
+  const row = await env.DB.prepare(sql)
+    .bind(...binds)
+    .first();
+  return Number(row?.count || 0);
+}
+
+function cleanupCutoffIso(cleanup, now = new Date()) {
+  return new Date(now.getTime() - cleanup.retentionDays * 24 * 60 * 60 * 1000).toISOString();
 }
 
 async function adminListMessages(env, url) {
@@ -694,24 +907,16 @@ async function adminListMessages(env, url) {
   return jsonResponse({ messages });
 }
 
-async function adminGetMessage(request, env, admin, messageId, url) {
+async function adminGetMessage(env, admin, messageId) {
   const message = await getMessage(env, messageId);
   if (!message) {
     throw httpError(404, 'not_found', 'Message not found.');
   }
 
-  const reason = (url.searchParams.get('reason') || 'Manual admin review').slice(0, 200);
   const plaintext = await decryptSafe(message, env);
   const sourceIp = message.creator_ip_ciphertext
     ? await decryptPackedString(message.creator_ip_ciphertext, env).catch(() => null)
     : null;
-
-  await insertAuditLog(env, request, admin, {
-    action: 'view_message',
-    targetType: 'message',
-    targetId: messageId,
-    reason
-  });
 
   const events = await env.DB.prepare(
     `SELECT event_type, actor_type, actor_id, reason, created_at
@@ -780,12 +985,6 @@ async function adminQuarantineMessage(request, env, admin, messageId) {
     .run();
 
   await insertEvent(env, { messageId, eventType: 'quarantined', actorType: 'admin', actorId: admin.id, reason });
-  await insertAuditLog(env, request, admin, {
-    action: 'quarantine_message',
-    targetType: 'message',
-    targetId: messageId,
-    reason
-  });
 
   return jsonResponse({ ok: true, status: 'quarantined' });
 }
@@ -808,12 +1007,6 @@ async function adminDeleteMessage(request, env, admin, messageId) {
     .run();
 
   await insertEvent(env, { messageId, eventType: 'deleted', actorType: 'admin', actorId: admin.id, reason });
-  await insertAuditLog(env, request, admin, {
-    action: 'delete_message',
-    targetType: 'message',
-    targetId: messageId,
-    reason
-  });
 
   return jsonResponse({ ok: true, status: 'deleted' });
 }
@@ -844,13 +1037,6 @@ async function adminBatchDeleteMessages(request, env, admin) {
     await insertEvent(env, { messageId, eventType: 'deleted', actorType: 'admin', actorId: admin.id, reason });
   }
 
-  await insertAuditLog(env, request, admin, {
-    action: 'batch_delete_messages',
-    targetType: 'message',
-    targetId: ids.join(','),
-    reason
-  });
-
   return jsonResponse({ ok: true, deleted: ids.length });
 }
 
@@ -867,12 +1053,6 @@ async function adminBanMessageSource(request, env, admin, messageId) {
     : null;
   await createBlock(env, admin, 'ip', message.creator_ip_hash, reason, sourceIp);
   await insertEvent(env, { messageId, eventType: 'source_banned', actorType: 'admin', actorId: admin.id, reason });
-  await insertAuditLog(env, request, admin, {
-    action: 'ban_source',
-    targetType: 'message',
-    targetId: messageId,
-    reason
-  });
 
   return jsonResponse({ ok: true });
 }
@@ -933,13 +1113,6 @@ async function adminReviewReport(request, env, admin, reportId, action) {
     ? await restoreMessageAfterRejectedReport(env, admin, report, resolution)
     : false;
 
-  await insertAuditLog(env, request, admin, {
-    action: isReject ? 'reject_report' : 'confirm_report',
-    targetType: 'report',
-    targetId: String(reportId),
-    reason: resolution
-  });
-
   return jsonResponse({ ok: true, status: nextStatus, messageRestored });
 }
 
@@ -986,10 +1159,9 @@ async function restoreMessageAfterRejectedReport(env, admin, report, reason) {
   return true;
 }
 
-async function adminBatchDeleteReports(request, env, admin) {
+async function adminBatchDeleteReports(request, env) {
   const body = await readJson(request);
   const ids = normalizeIntegerIds(body.ids, 100);
-  const reason = optionalReason(body.reason);
 
   if (!ids.length) {
     throw httpError(400, 'ids_required', 'At least one report id is required.');
@@ -1027,13 +1199,6 @@ async function adminBatchDeleteReports(request, env, admin) {
       .run();
   }
 
-  await insertAuditLog(env, request, admin, {
-    action: 'batch_delete_reports',
-    targetType: 'report',
-    targetId: ids.join(','),
-    reason
-  });
-
   return jsonResponse({ ok: true, deleted: ids.length });
 }
 
@@ -1068,12 +1233,6 @@ async function adminCreateBlockedSource(request, env, admin) {
 
   const valueHash = await stableHash(value, env);
   await createBlock(env, admin, blockType, valueHash, reason, value);
-  await insertAuditLog(env, request, admin, {
-    action: 'ban_source',
-    targetType: 'blocked_source',
-    targetId: `${blockType}:${value}`,
-    reason
-  });
 
   return jsonResponse({ ok: true });
 }
@@ -1092,57 +1251,7 @@ async function adminLiftBlockedSource(request, env, admin, blockId) {
     .bind(now, blockId)
     .run();
 
-  await insertAuditLog(env, request, admin, {
-    action: 'unban_source',
-    targetType: 'blocked_source',
-    targetId: String(blockId),
-    reason
-  });
-
   return jsonResponse({ ok: true });
-}
-
-async function adminAuditLogs(env) {
-  const rows = await env.DB.prepare(
-    `SELECT id, admin_id, action, target_type, target_id, reason, ip_hash, ip_ciphertext, user_agent_summary, created_at
-       FROM admin_audit_logs
-      ORDER BY created_at DESC
-      LIMIT 100`
-  ).all();
-
-  const auditLogs = [];
-  for (const row of rows.results || []) {
-    const ip = row.ip_ciphertext
-      ? await decryptPackedString(row.ip_ciphertext, env).catch(() => null)
-      : null;
-    auditLogs.push({ ...row, ip });
-  }
-
-  return jsonResponse({ auditLogs });
-}
-
-async function adminBatchDeleteAuditLogs(request, env, admin) {
-  const body = await readJson(request);
-  const ids = normalizeIntegerIds(body.ids, 100);
-  const reason = optionalReason(body.reason);
-
-  if (!ids.length) {
-    throw httpError(400, 'ids_required', 'At least one audit log id is required.');
-  }
-
-  const placeholders = ids.map(() => '?').join(',');
-  await env.DB.prepare(`DELETE FROM admin_audit_logs WHERE id IN (${placeholders})`)
-    .bind(...ids)
-    .run();
-
-  await insertAuditLog(env, request, admin, {
-    action: 'batch_delete_audit_logs',
-    targetType: 'admin_audit_log',
-    targetId: ids.join(','),
-    reason
-  });
-
-  return jsonResponse({ ok: true, deleted: ids.length });
 }
 
 async function expireMessages(env) {
@@ -1375,13 +1484,15 @@ async function assertSourceAllowed(env, metadata) {
 }
 
 async function requestMetadata(request, env) {
-  const ip = preferredClientIp(request.headers);
+  const connectionIp = connectionClientIp(request.headers);
+  const ip = preferredClientIp(request.headers, connectionIp);
   const userAgent = request.headers.get('user-agent') || 'unknown';
   const ipHash = await stableHash(ip, env);
   const userAgentHash = await stableHash(userAgent, env);
 
   return {
     ip,
+    verificationIp: connectionIp || ip,
     ipHash,
     ipCiphertext: await encryptPackedString(ip, env),
     userAgentHash,
@@ -1389,14 +1500,36 @@ async function requestMetadata(request, env) {
   };
 }
 
-function preferredClientIp(headers) {
+function preferredClientIp(headers, connectionIp) {
+  const cloudflareCandidates = [
+    ...ipHeaderCandidates(headers.get('cf-connecting-ip')),
+    ...ipHeaderCandidates(headers.get('true-client-ip'))
+  ];
+  const fallbackCandidates = [
+    ...ipHeaderCandidates(headers.get('x-real-ip')),
+    ...ipHeaderCandidates(headers.get('x-forwarded-for'))
+  ];
+  const candidates = [...cloudflareCandidates, ...fallbackCandidates];
+
+  // 来源展示和封禁优先使用真实 IPv4；IPv6-only 访问保留原始 IPv6，页面负责长地址换行。
+  const ipv4 = candidates.find(isIpv4Address);
+  if (ipv4) {
+    return ipv4;
+  }
+
+  const sourceIp = connectionIp || cloudflareCandidates[0] || fallbackCandidates[0];
+  return sourceIp || '0.0.0.0';
+}
+
+function connectionClientIp(headers) {
   const candidates = [
     ...ipHeaderCandidates(headers.get('cf-connecting-ip')),
+    ...ipHeaderCandidates(headers.get('true-client-ip')),
+    ...ipHeaderCandidates(headers.get('x-real-ip')),
     ...ipHeaderCandidates(headers.get('x-forwarded-for'))
   ];
 
-  // 来源展示和封禁优先使用 IPv4；没有 IPv4 时保留 IPv6，避免 IPv6-only 访问失去来源信息。
-  return candidates.find(isIpv4Address) || candidates[0] || '0.0.0.0';
+  return candidates[0] || '';
 }
 
 function ipHeaderCandidates(value) {
@@ -1555,27 +1688,6 @@ async function insertEvent(env, event) {
       event.ipHash || null,
       event.userAgentSummary || null,
       event.reason || null,
-      new Date().toISOString()
-    )
-    .run();
-}
-
-async function insertAuditLog(env, request, admin, audit) {
-  const metadata = await requestMetadata(request, env);
-  await env.DB.prepare(
-    `INSERT INTO admin_audit_logs (
-      admin_id, action, target_type, target_id, reason, ip_hash, ip_ciphertext, user_agent_summary, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  )
-    .bind(
-      admin.id,
-      audit.action,
-      audit.targetType,
-      audit.targetId,
-      audit.reason || null,
-      metadata.ipHash,
-      metadata.ipCiphertext,
-      metadata.userAgentSummary,
       new Date().toISOString()
     )
     .run();
@@ -1780,6 +1892,36 @@ function normalizeReason(reason) {
   const allowed = new Set(['illegal', 'abuse', 'spam', 'harassment', 'other']);
   const value = typeof reason === 'string' ? reason.trim().toLowerCase() : '';
   return allowed.has(value) ? value : 'other';
+}
+
+function normalizeBoolean(value, fallback) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    return value === 1;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+      return true;
+    }
+    if (['0', 'false', 'no', 'off'].includes(normalized)) {
+      return false;
+    }
+  }
+
+  return fallback;
+}
+
+function validIsoString(value) {
+  if (typeof value !== 'string' || !value) {
+    return false;
+  }
+
+  return !Number.isNaN(new Date(value).getTime());
 }
 
 function requiredReason(reason, message) {

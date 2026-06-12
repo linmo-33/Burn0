@@ -13,7 +13,7 @@ const ADMIN_COPY = {
       messages: '消息',
       reports: '举报',
       blocked: '封禁',
-      audit: '审计'
+      settings: '设置'
     },
     adminNav: '管理',
     adminEyebrow: '管理',
@@ -89,9 +89,20 @@ const ADMIN_COPY = {
     block: '封禁',
     noBlocked: '暂无封禁来源。',
     lift: '解除',
-    auditTitle: '审计日志',
-    auditCopy: '关键操作记录。',
-    noAudit: '暂无审计日志。',
+    settingsTitle: '设置',
+    settingsCopy: '清理策略和运行状态。',
+    cleanupTitle: '消息清理',
+    cleanupEnabled: '自动清理',
+    cleanupIntervalHours: '执行间隔（小时）',
+    cleanupRetentionDays: '保留天数',
+    cleanupLastRun: '上次运行',
+    cleanupPurgeable: '可清理消息',
+    cleanupCutoff: '清理截止',
+    cleanupNever: '尚未运行',
+    saveSettings: '保存设置',
+    purgeNow: '立即清理',
+    settingsSaved: '设置已保存。',
+    purgeResult: (result) => `已清理 ${result.messages} 条消息、${result.reports} 条举报、${result.events} 条事件。${result.hasMore ? '仍有更多可清理数据。' : ''}`,
     blockForm: {
       ip: 'IP',
       userAgent: 'User-Agent',
@@ -145,7 +156,7 @@ const ADMIN_COPY = {
       messages: 'Messages',
       reports: 'Reports',
       blocked: 'Blocked',
-      audit: 'Audit'
+      settings: 'Settings'
     },
     adminNav: 'Admin navigation',
     adminEyebrow: 'Admin',
@@ -221,9 +232,20 @@ const ADMIN_COPY = {
     block: 'Block',
     noBlocked: 'No blocked sources.',
     lift: 'Lift',
-    auditTitle: 'Audit logs',
-    auditCopy: 'Key actions are recorded here.',
-    noAudit: 'No audit logs.',
+    settingsTitle: 'Settings',
+    settingsCopy: 'Cleanup policy and run state.',
+    cleanupTitle: 'Message cleanup',
+    cleanupEnabled: 'Automatic cleanup',
+    cleanupIntervalHours: 'Interval hours',
+    cleanupRetentionDays: 'Retention days',
+    cleanupLastRun: 'Last run',
+    cleanupPurgeable: 'Purgeable messages',
+    cleanupCutoff: 'Cleanup cutoff',
+    cleanupNever: 'Never',
+    saveSettings: 'Save settings',
+    purgeNow: 'Purge now',
+    settingsSaved: 'Settings saved.',
+    purgeResult: (result) => `Purged ${result.messages} messages, ${result.reports} reports, and ${result.events} events.${result.hasMore ? ' More purgeable data remains.' : ''}`,
     blockForm: {
       ip: 'IP',
       userAgent: 'User-Agent',
@@ -377,7 +399,7 @@ function renderAdminShell() {
           ${navButton('messages', copy.nav.messages)}
           ${navButton('reports', copy.nav.reports)}
           ${navButton('blocked', copy.nav.blocked)}
-          ${navButton('audit', copy.nav.audit)}
+          ${navButton('settings', copy.nav.settings)}
         </nav>
         <button class="ghost-button lang-toggle" type="button" data-lang-toggle>${copy.langToggle}</button>
         <p class="meta" id="adminIdentity">${copy.checkingAccess}</p>
@@ -420,8 +442,8 @@ async function loadSection(section) {
     await renderReports();
   } else if (section === 'blocked') {
     await renderBlocked();
-  } else if (section === 'audit') {
-    await renderAudit();
+  } else if (section === 'settings') {
+    await renderSettings();
   }
 }
 
@@ -702,52 +724,71 @@ async function fetchBlocked() {
   });
 }
 
-async function renderAudit() {
+async function renderSettings(message = '') {
   const copy = tr();
   const main = adminMain();
-  main.innerHTML = `${header(copy.auditTitle, copy.auditCopy)}<div id="auditTable"></div>`;
-  const data = await adminApi('/api/admin/audit-logs');
-  const rows = data.auditLogs || [];
-  const target = document.getElementById('auditTable');
+  const data = await adminApi('/api/admin/settings');
+  const cleanup = data.cleanup;
+  const purgeable = data.purgeable || {};
 
-  if (!rows.length) {
-    target.innerHTML = `<div class="empty">${copy.noAudit}</div>`;
-    return;
-  }
-
-  target.innerHTML = `
-    ${bulkToolbar('audit', copy)}
-    <div class="table-wrap">
-      <table class="admin-table audit-table">
-        <thead>
-          <tr>
-            <th class="select-cell"><input type="checkbox" data-select-all="audit" aria-label="${copy.selectAll}"></th>
-            <th>${copy.headers.action}</th>
-            <th>${copy.headers.target}</th>
-            <th>${copy.headers.admin}</th>
-            <th>${copy.headers.reason}</th>
-            <th>${copy.headers.source}</th>
-            <th>${copy.headers.time}</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.map((row) => `
-            <tr>
-              <td class="select-cell"><input type="checkbox" data-select-audit value="${row.id}" aria-label="${copy.selectAll}"></td>
-              <td>${escapeHtml(row.action)}</td>
-              <td>${escapeHtml(row.target_type)} · ${escapeHtml(row.target_id)}</td>
-              <td>${escapeHtml(row.admin_id)}</td>
-              <td>${escapeHtml(row.reason || '')}</td>
-              <td>${escapeHtml(row.ip || '')}</td>
-              <td>${formatDate(row.created_at)}</td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-    </div>
+  main.innerHTML = `
+    ${header(copy.settingsTitle, copy.settingsCopy)}
+    <section class="settings-panel">
+      <form class="settings-form" id="cleanupForm">
+        <h2>${copy.cleanupTitle}</h2>
+        <label class="toggle-row">
+          <input name="enabled" type="checkbox"${cleanup.enabled ? ' checked' : ''}>
+          <span>${copy.cleanupEnabled}</span>
+        </label>
+        <label>
+          <span>${copy.cleanupIntervalHours}</span>
+          <input name="intervalHours" type="number" min="1" max="720" step="1" value="${escapeAttr(cleanup.intervalHours)}">
+        </label>
+        <label>
+          <span>${copy.cleanupRetentionDays}</span>
+          <input name="retentionDays" type="number" min="1" max="3650" step="1" value="${escapeAttr(cleanup.retentionDays)}">
+        </label>
+        <div class="settings-actions">
+          <button class="secondary-button" type="submit">${copy.saveSettings}</button>
+          <button class="danger-button" id="purgeNow" type="button">${copy.purgeNow}</button>
+        </div>
+      </form>
+      <dl class="settings-stats">
+        <div><dt>${copy.cleanupPurgeable}</dt><dd>${Number(purgeable.messages || 0)}</dd></div>
+        <div><dt>${copy.cleanupCutoff}</dt><dd>${formatDate(purgeable.cutoff)}</dd></div>
+        <div><dt>${copy.cleanupLastRun}</dt><dd>${cleanup.lastRunAt ? formatDate(cleanup.lastRunAt) : copy.cleanupNever}</dd></div>
+      </dl>
+    </section>
+    <div id="settingsNotice">${message ? `<div class="notice">${escapeHtml(message)}</div>` : ''}</div>
   `;
 
-  bindBulkSelection(target, 'audit', deleteSelectedAuditLogs);
+  document.getElementById('cleanupForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const payload = {
+      cleanup: {
+        enabled: form.elements.enabled.checked,
+        intervalHours: form.elements.intervalHours.value,
+        retentionDays: form.elements.retentionDays.value
+      }
+    };
+    await adminApi('/api/admin/settings', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    await renderSettings(copy.settingsSaved);
+  });
+
+  document.getElementById('purgeNow').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const result = await adminApi('/api/admin/settings/purge', { method: 'POST' });
+      await renderSettings(copy.purgeResult(result.result));
+    } finally {
+      button.disabled = false;
+    }
+  });
 }
 
 async function openMessageDrawer(messageId) {
@@ -765,8 +806,7 @@ async function openMessageDrawer(messageId) {
   `;
   document.getElementById('closeDrawer').addEventListener('click', closeDrawer);
 
-  const reason = language === 'zh' ? '查看详情' : 'View detail';
-  const data = await adminApi(`/api/admin/messages/${encodeURIComponent(messageId)}?reason=${encodeURIComponent(reason)}`);
+  const data = await adminApi(`/api/admin/messages/${encodeURIComponent(messageId)}`);
   const message = data.message;
 
   drawer.innerHTML = `
@@ -931,19 +971,6 @@ async function deleteSelectedReports(container) {
     body: JSON.stringify({ ids, reason })
   });
   await renderReports();
-}
-
-async function deleteSelectedAuditLogs(container) {
-  const ids = selectedBulkValues(container, 'audit');
-  const reason = await requestReason(tr().promptDeleteOptional, { allowEmpty: true });
-  if (reason === undefined) {
-    return;
-  }
-  await adminApi('/api/admin/audit-logs/batch-delete', {
-    method: 'POST',
-    body: JSON.stringify({ ids, reason })
-  });
-  await renderAudit();
 }
 
 function closeDrawer() {
