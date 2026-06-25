@@ -1,3 +1,5 @@
+import { icon } from '/icons.js';
+
 const root = document.getElementById('root');
 const MAX_TEXT_LENGTH = 10000;
 const LANG_KEY = 'burn0_lang';
@@ -239,10 +241,10 @@ function renderHome() {
           <h1 id="hero-title">${copy.heroTitle}</h1>
           <p class="hero-lede">${copy.heroLede}</p>
           <div class="feature-line" aria-label="Burn0 capabilities">
-            <span>${copy.featureText}</span>
-            <span>${copy.featureViews}</span>
-            <span>${copy.featureExpiry}</span>
-            <span>${copy.featureModerated}</span>
+            <span>${icon('link', { size: 15 })}${copy.featureText}</span>
+            <span>${icon('repeat', { size: 15 })}${copy.featureViews}</span>
+            <span>${icon('clock', { size: 15 })}${copy.featureExpiry}</span>
+            <span>${icon('eyeOff', { size: 15 })}${copy.featureModerated}</span>
           </div>
         </section>
 
@@ -406,13 +408,13 @@ async function createMessage() {
       </div>
       <div class="share-row">
         <input id="shareUrl" readonly value="${escapeAttr(response.shareUrl)}">
-        <button class="secondary-button" type="button" id="copyLink">${copy.copy}</button>
+        <button class="secondary-button" type="button" id="copyLink">${icon('copy')}<span class="btn-label">${copy.copy}</span></button>
       </div>
     `);
 
     document.getElementById('copyLink').addEventListener('click', async () => {
       await navigator.clipboard.writeText(response.shareUrl);
-      document.getElementById('copyLink').textContent = copy.copied;
+      document.getElementById('copyLink').innerHTML = `${icon('check')}<span class="btn-label">${copy.copied}</span>`;
     });
   } catch (error) {
     showResult(result, `<div class="notice is-danger">${escapeHtml(error.message)}</div>`);
@@ -469,11 +471,13 @@ function renderOpenedMessage(panel, id, message) {
     </div>
     <article class="message-body" aria-label="${copy.openedTitle}">${escapeHtml(text)}</article>
     <div class="action-row message-actions">
-      <a class="secondary-button" href="/">${copy.createAnother}</a>
-      <button class="ghost-button" type="button" id="toggleReport">${copy.reportLink}</button>
+      <a class="secondary-button" href="/">${icon('plus')}<span class="btn-label">${copy.createAnother}</span></a>
+      <button class="secondary-button" type="button" id="copyMessage">${icon('copy')}<span class="btn-label">${copy.copy}</span></button>
+      <button class="ghost-button" type="button" id="toggleReport">${icon('flag', { size: 16 })}<span class="btn-label">${copy.reportLink}</span></button>
     </div>
     ${reportBox(id)}
   `;
+  bindCopyMessage(panel, text);
   bindReport(panel, id);
 }
 
@@ -508,6 +512,26 @@ function bindReport(panel, id) {
     } finally {
       submit.disabled = false;
       submit.textContent = copy.submitReport;
+    }
+  });
+}
+
+function bindCopyMessage(panel, text) {
+  const copy = t();
+  const button = panel.querySelector('#copyMessage');
+  if (!button) {
+    return;
+  }
+
+  button.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      button.innerHTML = `${icon('check')}<span class="btn-label">${copy.copied}</span>`;
+      window.setTimeout(() => {
+        button.innerHTML = `${icon('copy')}<span class="btn-label">${copy.copy}</span>`;
+      }, 2000);
+    } catch (_error) {
+      // 剪贴板不可用时（如非安全上下文）保持按钮可用，不打断阅读
     }
   });
 }
@@ -826,8 +850,10 @@ async function api(path, options = {}) {
 }
 
 function showResult(element, html) {
-  element.classList.add('is-visible');
-  element.innerHTML = html;
+  // 内容包一层 inner 容器，配合 CSS 的 grid-template-rows 过渡平滑展开，避免生成后页面骤然撑高
+  element.innerHTML = `<div class="result-inner">${html}</div>`;
+  // 强制下一帧再加 is-visible，确保从折叠态过渡而非瞬间出现
+  requestAnimationFrame(() => element.classList.add('is-visible'));
 }
 
 function escapeHtml(value) {

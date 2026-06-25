@@ -1,5 +1,8 @@
+import { icon } from '/icons.js';
+
 let rootElement;
 let activeSection = 'dashboard';
+const ADMIN_SECTIONS = ['dashboard', 'messages', 'reports', 'blocked', 'settings'];
 let currentStatus = 'all';
 let currentQuery = '';
 const LANG_KEY = 'burn0_lang';
@@ -31,6 +34,19 @@ const ADMIN_COPY = {
       blockedSources: '封禁来源',
       recentMessages: '24 小时创建',
       recentReports: '24 小时举报'
+    },
+    metricGroups: {
+      messages: '消息状态',
+      moderation: '审核',
+      recent: '近 24 小时',
+      charts: '数据图表'
+    },
+    charts: {
+      statusTitle: '消息状态分布',
+      activityTitle: '近 24 小时活动',
+      createdLabel: '创建',
+      reportsLabel: '举报',
+      empty: '暂无数据'
     },
     messagesTitle: '消息',
     messagesCopy: '正文、状态和来源信号。',
@@ -109,6 +125,9 @@ const ADMIN_COPY = {
       value: 'IP 或 User-Agent'
     },
     messageTitle: '消息',
+    accessUrl: '访问地址',
+    copy: '复制',
+    copied: '已复制',
     quarantine: '隔离',
     delete: '删除',
     ban: '封禁来源',
@@ -174,6 +193,19 @@ const ADMIN_COPY = {
       blockedSources: 'Blocked sources',
       recentMessages: 'Created in 24h',
       recentReports: 'Reports in 24h'
+    },
+    metricGroups: {
+      messages: 'Message status',
+      moderation: 'Moderation',
+      recent: 'Last 24 hours',
+      charts: 'Charts'
+    },
+    charts: {
+      statusTitle: 'Status distribution',
+      activityTitle: 'Activity (last 24h)',
+      createdLabel: 'Created',
+      reportsLabel: 'Reports',
+      empty: 'No data yet'
     },
     messagesTitle: 'Messages',
     messagesCopy: 'Text, status, and source signals.',
@@ -252,6 +284,9 @@ const ADMIN_COPY = {
       value: 'IP or User-Agent'
     },
     messageTitle: 'Message',
+    accessUrl: 'Access link',
+    copy: 'Copy',
+    copied: 'Copied',
     quarantine: 'Quarantine',
     delete: 'Delete',
     ban: 'Ban source',
@@ -308,7 +343,22 @@ export async function startAdmin(root) {
 async function renderAdminApp() {
   renderAdminShell();
   bindAdminShell();
-  await loadSection('dashboard');
+  // 刷新后按 URL 还原当前分区，避免总是回到总览
+  await loadSection(sectionFromPath());
+}
+
+// 从 /admin/<section> 解析当前分区，未识别时回退到总览
+function sectionFromPath() {
+  const segment = window.location.pathname.replace(/^\/admin\/?/, '').split('/')[0];
+  return ADMIN_SECTIONS.includes(segment) ? segment : 'dashboard';
+}
+
+// 把当前分区写入 URL，使刷新可还原；总览用 /admin，其余用 /admin/<section>
+function syncSectionUrl(section) {
+  const target = section === 'dashboard' ? '/admin' : `/admin/${section}`;
+  if (window.location.pathname !== target) {
+    window.history.replaceState({}, '', target);
+  }
 }
 
 function renderAdminLogin() {
@@ -395,11 +445,11 @@ function renderAdminShell() {
           <span>Burn0</span>
         </a>
         <nav class="admin-nav" aria-label="${copy.adminNav}">
-          ${navButton('dashboard', copy.nav.dashboard)}
-          ${navButton('messages', copy.nav.messages)}
-          ${navButton('reports', copy.nav.reports)}
-          ${navButton('blocked', copy.nav.blocked)}
-          ${navButton('settings', copy.nav.settings)}
+          ${navButton('dashboard', copy.nav.dashboard, 'dashboard')}
+          ${navButton('messages', copy.nav.messages, 'mail')}
+          ${navButton('reports', copy.nav.reports, 'flag')}
+          ${navButton('blocked', copy.nav.blocked, 'ban')}
+          ${navButton('settings', copy.nav.settings, 'settings')}
         </nav>
         <button class="ghost-button lang-toggle" type="button" data-lang-toggle>${copy.langToggle}</button>
         <p class="meta" id="adminIdentity">${copy.checkingAccess}</p>
@@ -434,6 +484,8 @@ async function loadSection(section) {
     return;
   }
 
+  syncSectionUrl(section);
+
   if (section === 'dashboard') {
     await renderDashboard();
   } else if (section === 'messages') {
@@ -454,24 +506,187 @@ async function renderDashboard() {
 
   const data = await adminApi('/api/admin/metrics');
   const metrics = data.metrics;
-  const cards = [
-    [copy.metrics.total, metrics.total],
-    [copy.metrics.active, metrics.active],
-    [copy.metrics.burned, metrics.burned],
-    [copy.metrics.expired, metrics.expired],
-    [copy.metrics.quarantined, metrics.quarantined],
-    [copy.metrics.deleted, metrics.deleted],
-    [copy.metrics.openReports, metrics.openReports],
-    [copy.metrics.blockedSources, metrics.blockedSources],
-    [copy.metrics.recentMessages, metrics.recentMessages],
-    [copy.metrics.recentReports, metrics.recentReports]
+  // 按语义分组展示：消息状态、审核、近 24 小时，并对关键指标做视觉强调
+  const groups = [
+    {
+      title: copy.metricGroups.messages,
+      items: [
+        [copy.metrics.total, metrics.total, 'feature', 'inbox'],
+        [copy.metrics.active, metrics.active, 'ok', 'eye'],
+        [copy.metrics.burned, metrics.burned, '', 'flame'],
+        [copy.metrics.expired, metrics.expired, '', 'clock'],
+        [copy.metrics.quarantined, metrics.quarantined, '', 'shieldAlert'],
+        [copy.metrics.deleted, metrics.deleted, '', 'trash']
+      ]
+    },
+    {
+      title: copy.metricGroups.moderation,
+      items: [
+        // 有待审核举报时高亮告警，提醒管理员及时处理
+        [copy.metrics.openReports, metrics.openReports, metrics.openReports > 0 ? 'alert' : '', 'flag'],
+        [copy.metrics.blockedSources, metrics.blockedSources, '', 'ban']
+      ]
+    },
+    {
+      title: copy.metricGroups.recent,
+      items: [
+        [copy.metrics.recentMessages, metrics.recentMessages, '', 'mail'],
+        [copy.metrics.recentReports, metrics.recentReports, '', 'trendingUp']
+      ]
+    }
   ];
 
+  const metricCard = (label, value, tone, iconName) => `
+    <div class="metric${tone ? ` is-${tone}` : ''}">
+      <span class="metric-icon">${icon(iconName, { size: 18 })}</span>
+      <div class="metric-body">
+        <span class="metric-label">${label}</span>
+        <strong>${value}</strong>
+      </div>
+    </div>
+  `;
+
+  main.insertAdjacentHTML('beforeend', groups.map((group) => `
+    <section class="metric-group">
+      <h2 class="metric-group-title">${group.title}</h2>
+      <div class="metric-row">
+        ${group.items.map(([label, value, tone, iconName]) => metricCard(label, value, tone, iconName)).join('')}
+      </div>
+    </section>
+  `).join(''));
+
+  // 用图表直观呈现消息状态构成与近 24 小时活动趋势
   main.insertAdjacentHTML('beforeend', `
-    <section class="admin-grid">
-      ${cards.map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`).join('')}
+    <section class="metric-group">
+      <h2 class="metric-group-title">${copy.metricGroups.charts}</h2>
+      <div class="chart-grid">
+        <div class="chart-card">
+          <h3 class="chart-title">${copy.charts.statusTitle}</h3>
+          <div class="chart-box"><canvas id="statusChart"></canvas></div>
+        </div>
+        <div class="chart-card">
+          <h3 class="chart-title">${copy.charts.activityTitle}</h3>
+          <div class="chart-box"><canvas id="activityChart"></canvas></div>
+        </div>
+      </div>
     </section>
   `);
+
+  await renderDashboardCharts(metrics);
+}
+
+// Chart.js 自托管脚本加载（UMD 挂到 window.Chart），失败时图表区静默降级
+let chartScriptPromise;
+function loadChartScript() {
+  if (window.Chart) {
+    return Promise.resolve(window.Chart);
+  }
+  if (!chartScriptPromise) {
+    chartScriptPromise = new Promise((resolve, reject) => {
+      const existing = document.querySelector('[data-chart-script]');
+      if (existing) {
+        existing.addEventListener('load', () => resolve(window.Chart), { once: true });
+        existing.addEventListener('error', reject, { once: true });
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = '/vendor/chart.umd.min.js';
+      script.async = true;
+      script.dataset.chartScript = 'true';
+      script.addEventListener('load', () => resolve(window.Chart), { once: true });
+      script.addEventListener('error', reject, { once: true });
+      document.head.appendChild(script);
+    });
+  }
+  return chartScriptPromise;
+}
+
+async function renderDashboardCharts(metrics) {
+  const copy = tr();
+  let Chart;
+  try {
+    Chart = await loadChartScript();
+  } catch (_error) {
+    markChartUnavailable(copy.charts.empty);
+    return;
+  }
+  if (!Chart) {
+    markChartUnavailable(copy.charts.empty);
+    return;
+  }
+
+  // 主题色取自 CSS 设计变量，保证图表与暗色界面一致
+  const ink = '#a8a8a3';
+  const grid = 'rgba(255, 255, 255, 0.06)';
+  Chart.defaults.color = ink;
+  Chart.defaults.font.family = 'Inter, system-ui, sans-serif';
+  Chart.defaults.font.size = 12;
+
+  const statusCanvas = document.getElementById('statusChart');
+  const statusValues = [metrics.active, metrics.burned, metrics.expired, metrics.quarantined, metrics.deleted];
+  const statusTotal = statusValues.reduce((sum, value) => sum + (value || 0), 0);
+  if (statusCanvas && statusTotal > 0) {
+    new Chart(statusCanvas, {
+      type: 'doughnut',
+      data: {
+        labels: [copy.metrics.active, copy.metrics.burned, copy.metrics.expired, copy.metrics.quarantined, copy.metrics.deleted],
+        datasets: [{
+          data: statusValues,
+          backgroundColor: ['#68d391', '#ff6a1a', '#6f6f6a', '#d9a441', '#ff3b30'],
+          borderColor: '#121212',
+          borderWidth: 2
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '62%',
+        plugins: {
+          legend: { position: 'right', labels: { boxWidth: 12, padding: 12 } }
+        }
+      }
+    });
+  } else if (statusCanvas) {
+    replaceCanvasWithEmpty(statusCanvas, copy.charts.empty);
+  }
+
+  const activityCanvas = document.getElementById('activityChart');
+  if (activityCanvas) {
+    new Chart(activityCanvas, {
+      type: 'bar',
+      data: {
+        labels: [copy.charts.createdLabel, copy.charts.reportsLabel],
+        datasets: [{
+          data: [metrics.recentMessages, metrics.recentReports],
+          backgroundColor: ['#ff6a1a', '#ff3b30'],
+          borderRadius: 6,
+          maxBarThickness: 64
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: { display: false } },
+          y: { beginAtZero: true, grid: { color: grid }, ticks: { precision: 0 } }
+        }
+      }
+    });
+  }
+}
+
+function markChartUnavailable(message) {
+  for (const box of document.querySelectorAll('.chart-box')) {
+    box.innerHTML = `<div class="empty">${escapeHtml(message)}</div>`;
+  }
+}
+
+function replaceCanvasWithEmpty(canvas, message) {
+  const box = canvas.closest('.chart-box');
+  if (box) {
+    box.innerHTML = `<div class="empty">${escapeHtml(message)}</div>`;
+  }
 }
 
 async function renderMessages() {
@@ -489,7 +704,7 @@ async function renderMessages() {
         ${statusOption('deleted', copy.statuses.deleted)}
       </select>
       <input id="messageSearch" type="search" placeholder="${copy.searchPlaceholder}">
-      <button class="secondary-button" id="refreshMessages" type="button">${copy.refresh}</button>
+      <button class="secondary-button" id="refreshMessages" type="button">${icon('refresh', { size: 16 })}<span class="btn-label">${copy.refresh}</span></button>
     </div>
     <div id="messageTable"></div>
   `;
@@ -808,17 +1023,23 @@ async function openMessageDrawer(messageId) {
 
   const data = await adminApi(`/api/admin/messages/${encodeURIComponent(messageId)}`);
   const message = data.message;
+  // 访问地址与前台分享链接同源同格式（/m/{id}），便于管理员直接复制核对
+  const accessUrl = `${window.location.origin}/m/${message.id}`;
 
   drawer.innerHTML = `
     <div class="drawer-header">
-      <div>
-        <strong>${escapeHtml(message.id)}</strong>
-        <div>${statusPill(message.status)}</div>
-      </div>
+      <div>${statusPill(message.status)}</div>
       <button class="ghost-button" id="closeDrawer" type="button">${copy.close}</button>
     </div>
     <div class="drawer-body">
       <div class="message-body admin-message-body">${escapeHtml(message.text || '[content unavailable]')}</div>
+      <div class="field">
+        <span class="label">${copy.accessUrl}</span>
+        <div class="share-row">
+          <input id="drawerAccessUrl" readonly value="${escapeAttr(accessUrl)}">
+          <button class="secondary-button" type="button" id="copyAccessUrl">${icon('copy')}<span class="btn-label">${copy.copy}</span></button>
+        </div>
+      </div>
       <div class="action-row">
         <button class="secondary-button" data-action="quarantine" data-id="${escapeAttr(message.id)}" type="button">${copy.quarantine}</button>
         <button class="danger-button" data-action="delete" data-id="${escapeAttr(message.id)}" type="button">${copy.delete}</button>
@@ -845,6 +1066,23 @@ async function openMessageDrawer(messageId) {
   `;
 
   document.getElementById('closeDrawer').addEventListener('click', closeDrawer);
+
+  // 一键复制访问地址，复制成功后短暂提示，剪贴板不可用时静默降级
+  const copyAccessUrl = document.getElementById('copyAccessUrl');
+  if (copyAccessUrl) {
+    copyAccessUrl.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(accessUrl);
+        copyAccessUrl.innerHTML = `${icon('check')}<span class="btn-label">${copy.copied}</span>`;
+        window.setTimeout(() => {
+          copyAccessUrl.innerHTML = `${icon('copy')}<span class="btn-label">${copy.copy}</span>`;
+        }, 2000);
+      } catch (_error) {
+        // 非安全上下文等剪贴板不可用场景下保持按钮可用，地址仍可手动选中复制
+      }
+    });
+  }
+
   drawer.addEventListener('click', drawerActionHandler, { once: true });
 }
 
@@ -896,7 +1134,7 @@ function bulkToolbar(type, copy) {
   return `
     <div class="bulk-toolbar">
       <span class="meta" data-selection-count="${type}">0</span>
-      <button class="danger-button" type="button" data-bulk-delete="${type}" disabled>${copy.deleteSelected}</button>
+      <button class="danger-button" type="button" data-bulk-delete="${type}" disabled>${icon('trash', { size: 16 })}<span class="btn-label">${copy.deleteSelected}</span></button>
     </div>
   `;
 }
@@ -1084,8 +1322,8 @@ function statusOption(value, label) {
   return `<option value="${value}">${label}</option>`;
 }
 
-function navButton(section, label) {
-  return `<button type="button" data-section="${section}">${label}</button>`;
+function navButton(section, label, iconName) {
+  return `<button type="button" data-section="${section}">${icon(iconName, { size: 17 })}<span class="nav-label">${label}</span></button>`;
 }
 
 function header(title, copy) {
