@@ -1,4 +1,7 @@
 const MAX_TEXT_LENGTH = 10000;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const IMAGE_TOKEN_SECONDS = 2 * 60;
+const IMAGE_CONTENT_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 const MIN_EXPIRY_SECONDS = 60;
 const MAX_EXPIRY_SECONDS = 7 * 24 * 60 * 60;
 const DEFAULT_EXPIRY_SECONDS = 24 * 60 * 60;
@@ -23,7 +26,14 @@ CREATE TABLE IF NOT EXISTS messages (
   encryption_iv TEXT,
   encryption_version INTEGER NOT NULL DEFAULT 1,
   encryption_key_id TEXT,
+  content_type TEXT NOT NULL DEFAULT 'text',
   text_size INTEGER NOT NULL DEFAULT 0,
+  image_object_key TEXT,
+  image_mime_type TEXT,
+  image_size INTEGER,
+  image_encryption_iv TEXT,
+  image_encryption_key_id TEXT,
+  image_deleted_at TEXT,
   burn_mode TEXT NOT NULL DEFAULT 'time_and_view',
   max_views INTEGER,
   view_count INTEGER NOT NULL DEFAULT 0,
@@ -221,7 +231,9 @@ async function handleApi(request, env, ctx, url) {
   if (request.method === 'GET' && pathname === '/api/public-config') {
     return jsonResponse({
       turnstileSiteKey: env.TURNSTILE_SITE_KEY || '',
-      turnstileRequired: Boolean(env.TURNSTILE_SECRET_KEY)
+      turnstileRequired: Boolean(env.TURNSTILE_SECRET_KEY),
+      imageSharingEnabled: imageSharingEnabled(env),
+      maxImageBytes: maxImageBytes(env)
     });
   }
 
@@ -251,6 +263,11 @@ async function handleApi(request, env, ctx, url) {
     });
   }
 
+  const imageMatch = pathname.match(/^\/api\/messages\/([^/]+)\/image$/);
+  if (request.method === 'GET' && imageMatch) {
+    return await servePublicMessageImage(request, env, ctx, decodeURIComponent(imageMatch[1]));
+  }
+
   const reportMatch = pathname.match(/^\/api\/messages\/([^/]+)\/report$/);
   if (request.method === 'POST' && reportMatch) {
     return await reportMessage(request, env, decodeURIComponent(reportMatch[1]));
@@ -268,6 +285,11 @@ async function handleApi(request, env, ctx, url) {
 }
 
 async function createMessage(request, env, url) {
+  const requestContentType = request.headers.get('content-type') || '';
+  if (requestContentType.toLowerCase().includes('multipart/form-data')) {
+    return await createImageMessage(request, env, url);
+  }
+
   const body = await readJson(request);
   const text = typeof body.text === 'string' ? body.text.trim() : '';
   const burnMode = normalizeBurnMode(body.burnMode);
@@ -332,11 +354,112 @@ async function createMessage(request, env, url) {
     {
       id: messageId,
       shareUrl: `${url.origin}/m/${messageId}`,
+      contentType: 'text',
       status: 'active',
       burnMode,
       maxViews,
       viewCount: 0,
       expiresAt
+    },
+    201
+  );
+}
+
+async function createImageMessage(request, env, url) {
+  if (!imageSharingEnabled(env)) {
+    throw httpError(400, 'image_sharing_unavailable', 'Image sharing is not configured.');
+  }
+
+  const form = await readFormData(request);
+  const burnMode = normalizeBurnMode(form.get('burnMode'));
+  const usesViewLimit = hasViewLimitMode(burnMode);
+  const usesTimeLimit = hasTimeLimitMode(burnMode);
+  const maxViews = usesViewLimit ? clampInteger(form.get('maxViews'), 1, MAX_VIEW_LIMIT, 1) : null;
+  const expiresInSeconds = usesTimeLimit
+    ? clampInteger(form.get('expiresInSeconds'), MIN_EXPIRY_SECONDS, MAX_EXPIRY_SECONDS, DEFAULT_EXPIRY_SECONDS)
+    : null;
+  const imageFile = form.get('image');
+
+  if (!(imageFile instanceof File)) {
+    throw httpError(400, 'image_required', 'Image file is required.');
+  }
+
+  const sourceBytes = new Uint8Array(await imageFile.arrayBuffer());
+  const image = validateImageBytes(sourceBytes, imageFile.type, env);
+  const metadata = await requestMetadata(request, env);
+  await verifyTurnstile(form.get('turnstileToken'), env, metadata.verificationIp);
+  await assertSourceAllowed(env, metadata);
+
+  const messageId = randomId();
+  const now = new Date();
+  const expiresAt = usesTimeLimit ? new Date(now.getTime() + expiresInSeconds * 1000).toISOString() : null;
+  const encrypted = await encryptBytes(sourceBytes, env);
+  const objectKey = imageObjectKey(env, messageId);
+  let storedImage = false;
+
+  try {
+    await env.IMAGE_BUCKET.put(objectKey, encrypted.ciphertext, {
+      httpMetadata: { contentType: 'application/octet-stream' }
+    });
+    storedImage = true;
+
+    await env.DB.prepare(
+      `INSERT INTO messages (
+        id, status, ciphertext, encryption_iv, encryption_version, encryption_key_id,
+        content_type, text_size, image_object_key, image_mime_type, image_size,
+        image_encryption_iv, image_encryption_key_id, burn_mode, max_views, view_count,
+        created_at, expires_at, creator_ip_hash, creator_ip_ciphertext,
+        user_agent_hash, user_agent_summary
+      ) VALUES (?, 'active', NULL, NULL, 1, ?, 'image', 0, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        messageId,
+        encrypted.keyId,
+        objectKey,
+        image.mimeType,
+        image.size,
+        encrypted.iv,
+        encrypted.keyId,
+        burnMode,
+        maxViews,
+        now.toISOString(),
+        expiresAt,
+        metadata.ipHash,
+        metadata.ipCiphertext,
+        metadata.userAgentHash,
+        metadata.userAgentSummary
+      )
+      .run();
+  } catch (error) {
+    if (storedImage) {
+      await env.IMAGE_BUCKET.delete(objectKey).catch(() => {});
+    }
+    throw error;
+  }
+
+  await insertEvent(env, {
+    messageId,
+    eventType: 'created',
+    actorType: 'visitor',
+    ipHash: metadata.ipHash,
+    userAgentSummary: metadata.userAgentSummary,
+    reason: createLimitReason(burnMode, maxViews, expiresAt)
+  });
+
+  return jsonResponse(
+    {
+      id: messageId,
+      shareUrl: `${url.origin}/m/${messageId}`,
+      contentType: 'image',
+      status: 'active',
+      burnMode,
+      maxViews,
+      viewCount: 0,
+      expiresAt,
+      image: {
+        mimeType: image.mimeType,
+        size: image.size
+      }
     },
     201
   );
@@ -353,6 +476,7 @@ async function getMessageStatus(env, messageId) {
     id: message.id,
     status: effectiveStatus,
     copy: STATUS_PUBLIC_COPY[effectiveStatus] || null,
+    contentType: messageContentType(message),
     burnMode: message.burn_mode,
     maxViews: message.max_views,
     viewCount: message.view_count,
@@ -377,6 +501,7 @@ async function openMessage(env, body) {
     }
     return jsonResponse({
       ...publicStatus(status),
+      contentType: messageContentType(message),
       burnMode: message.burn_mode,
       maxViews: message.max_views,
       viewCount: message.view_count,
@@ -387,7 +512,22 @@ async function openMessage(env, body) {
   const nextViewCount = message.view_count + 1;
   const isBurned = messageHasViewLimit(message) && nextViewCount >= message.max_views;
   const now = new Date().toISOString();
-  const plaintext = await decryptString(message.ciphertext, message.encryption_iv, env);
+  const contentType = messageContentType(message);
+  let plaintext = '';
+  let image = null;
+
+  if (contentType === 'text') {
+    plaintext = await decryptString(message.ciphertext, message.encryption_iv, env);
+  } else if (contentType === 'image') {
+    assertReadableImage(message);
+    image = {
+      url: await signedImageUrl(message, nextViewCount, isBurned, env),
+      mimeType: message.image_mime_type,
+      size: Number(message.image_size || 0)
+    };
+  } else {
+    throw httpError(409, 'content_unavailable', 'This content is unavailable.');
+  }
 
   await env.DB.prepare(
     `UPDATE messages
@@ -420,7 +560,9 @@ async function openMessage(env, body) {
 
   return jsonResponse({
     id: messageId,
+    contentType,
     text: plaintext,
+    image,
     status: isBurned ? 'burned' : 'active',
     burnMode: message.burn_mode,
     maxViews: message.max_views,
@@ -429,6 +571,158 @@ async function openMessage(env, body) {
     expiresAt: message.expires_at,
     burned: isBurned
   });
+}
+
+async function servePublicMessageImage(request, env, ctx, messageId) {
+  assertImageBucket(env);
+  const token = new URL(request.url).searchParams.get('token') || '';
+  const payload = await verifyImageToken(token, env);
+  const id = requireMessageId(messageId);
+
+  if (payload.sub !== id || payload.contentType !== 'image') {
+    throw httpError(403, 'invalid_image_token', 'Image link is invalid.');
+  }
+
+  const message = await getMessage(env, id);
+  if (!message || messageContentType(message) !== 'image') {
+    throw httpError(404, 'image_not_found', 'Image was not found.');
+  }
+
+  const status = effectivePublicStatus(message);
+  if (status === 'expired' && message.status !== 'expired') {
+    await markExpired(env, message, new Date().toISOString());
+    throw httpError(410, 'image_unavailable', 'Image has expired.');
+  }
+
+  const finalOpenRead = Boolean(payload.deleteAfterRead);
+  if (message.image_deleted_at || !message.image_object_key) {
+    throw httpError(410, 'image_unavailable', 'Image is no longer available.');
+  }
+  if (finalOpenRead) {
+    if (!['active', 'burned'].includes(status)) {
+      throw httpError(410, 'image_unavailable', 'Image is no longer available.');
+    }
+  } else if (status !== 'active') {
+    throw httpError(410, 'image_unavailable', 'Image is no longer available.');
+  }
+
+  const response = await imageContentResponse(env, message);
+  if (finalOpenRead) {
+    const task = deleteImageObject(env, message, new Date().toISOString());
+    if (ctx?.waitUntil) {
+      ctx.waitUntil(task);
+    } else {
+      await task;
+    }
+  }
+
+  return response;
+}
+
+async function serveAdminMessageImage(env, messageId) {
+  assertImageBucket(env);
+  const message = await getMessage(env, messageId);
+  if (!message || messageContentType(message) !== 'image') {
+    throw httpError(404, 'image_not_found', 'Image was not found.');
+  }
+
+  const status = effectivePublicStatus(message);
+  if (status === 'expired' && message.status !== 'expired') {
+    await markExpired(env, message, new Date().toISOString());
+    throw httpError(410, 'image_unavailable', 'Image has expired.');
+  }
+
+  if (!imageIsReadable(message) || !['active', 'quarantined'].includes(status)) {
+    throw httpError(410, 'image_unavailable', 'Image is no longer available.');
+  }
+
+  return await imageContentResponse(env, message);
+}
+
+async function imageContentResponse(env, message) {
+  const object = await env.IMAGE_BUCKET.get(message.image_object_key);
+  if (!object) {
+    throw httpError(404, 'image_not_found', 'Image object was not found.');
+  }
+
+  const encryptedBytes = new Uint8Array(await object.arrayBuffer());
+  const imageBytes = await decryptBytes(encryptedBytes, message.image_encryption_iv, env);
+  return new Response(imageBytes, {
+    headers: {
+      ...baseHeaders(),
+      'content-type': message.image_mime_type || 'application/octet-stream',
+      'content-length': String(imageBytes.byteLength),
+      'cache-control': 'no-store'
+    }
+  });
+}
+
+async function signedImageUrl(message, viewCount, deleteAfterRead, env) {
+  const token = await signImageToken({
+    sub: message.id,
+    contentType: 'image',
+    viewCount,
+    deleteAfterRead,
+    exp: Math.floor(Date.now() / 1000) + IMAGE_TOKEN_SECONDS
+  }, env);
+  return `/api/messages/${encodeURIComponent(message.id)}/image?token=${encodeURIComponent(token)}`;
+}
+
+async function signImageToken(payload, env) {
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  const signature = await hmacSha256Base64Url(encodedPayload, imageTokenSecret(env));
+  return `${encodedPayload}.${signature}`;
+}
+
+async function verifyImageToken(token, env) {
+  const [encodedPayload, signature] = String(token || '').split('.');
+  if (!encodedPayload || !signature) {
+    throw httpError(403, 'invalid_image_token', 'Image link is invalid.');
+  }
+
+  const expectedSignature = await hmacSha256Base64Url(encodedPayload, imageTokenSecret(env));
+  if (!constantTimeEqual(signature, expectedSignature)) {
+    throw httpError(403, 'invalid_image_token', 'Image link is invalid.');
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(base64UrlDecode(encodedPayload));
+  } catch (_error) {
+    throw httpError(403, 'invalid_image_token', 'Image link is invalid.');
+  }
+
+  if (Number(payload.exp || 0) <= Math.floor(Date.now() / 1000)) {
+    throw httpError(403, 'expired_image_token', 'Image link has expired.');
+  }
+
+  return payload;
+}
+
+async function deleteImageObject(env, message, now) {
+  if (!imageIsReadable(message) || !env.IMAGE_BUCKET) {
+    return false;
+  }
+
+  await env.IMAGE_BUCKET.delete(message.image_object_key);
+  await env.DB.prepare(
+    `UPDATE messages
+        SET image_deleted_at = COALESCE(image_deleted_at, ?)
+      WHERE id = ?`
+  )
+    .bind(now, message.id)
+    .run();
+  message.image_deleted_at = now;
+  return true;
+}
+
+async function deleteImageObjectBestEffort(env, message, now) {
+  try {
+    return await deleteImageObject(env, message, now);
+  } catch (error) {
+    console.error(`Failed to delete image object for message ${message?.id || 'unknown'}:`, error);
+    return false;
+  }
 }
 
 async function reportMessage(request, env, messageId) {
@@ -523,6 +817,11 @@ async function handleAdminApi(request, env, _ctx, url) {
   if (request.method === 'POST' && pathname === '/api/admin/messages/batch-delete') {
     requirePermission(admin, 'moderate');
     return await adminBatchDeleteMessages(request, env, admin);
+  }
+
+  const imageMatch = pathname.match(/^\/api\/admin\/messages\/([^/]+)\/image$/);
+  if (request.method === 'GET' && imageMatch) {
+    return await serveAdminMessageImage(env, decodeURIComponent(imageMatch[1]));
   }
 
   const detailMatch = pathname.match(/^\/api\/admin\/messages\/([^/]+)$/);
@@ -802,7 +1101,7 @@ async function purgeTerminalMessages(env, cleanup, options = {}) {
 
 async function purgeTerminalMessageBatch(env, cutoff) {
   const rows = await env.DB.prepare(
-    `SELECT id
+    `SELECT id, content_type, image_object_key, image_deleted_at
        FROM messages
       WHERE status IN ('deleted', 'expired', 'burned')
         AND COALESCE(deleted_at, expired_at, burned_at, created_at) <= ?
@@ -811,9 +1110,14 @@ async function purgeTerminalMessageBatch(env, cutoff) {
   )
     .bind(cutoff, CLEANUP_BATCH_SIZE)
     .all();
-  const ids = (rows.results || []).map((row) => row.id).filter(Boolean);
+  const terminalMessages = rows.results || [];
+  const ids = terminalMessages.map((row) => row.id).filter(Boolean);
   if (!ids.length) {
     return { messages: 0, reports: 0, events: 0 };
+  }
+
+  for (const message of terminalMessages) {
+    await deleteImageObjectBestEffort(env, message, new Date().toISOString());
   }
 
   const placeholders = ids.map(() => '?').join(',');
@@ -873,7 +1177,8 @@ async function adminListMessages(env, url) {
 
   const messages = [];
   for (const row of rows.results || []) {
-    const plaintext = await decryptSafe(row, env);
+    const contentType = messageContentType(row);
+    const plaintext = contentType === 'text' ? await decryptSafe(row, env) : '';
     if (query && !plaintext.toLowerCase().includes(query)) {
       continue;
     }
@@ -885,8 +1190,9 @@ async function adminListMessages(env, url) {
       id: row.id,
       status: effectivePublicStatus(row),
       storedStatus: row.status,
+      contentType,
       burnMode: row.burn_mode,
-      summary: summarizeText(plaintext, row.status),
+      summary: summarizeMessage(row, plaintext),
       createdAt: row.created_at,
       expiresAt: row.expires_at,
       openedAt: row.opened_at,
@@ -894,6 +1200,9 @@ async function adminListMessages(env, url) {
       viewCount: row.view_count,
       maxViews: row.max_views,
       reportCount: row.report_count,
+      imageMimeType: row.image_mime_type,
+      imageSize: row.image_size,
+      imageDeletedAt: row.image_deleted_at,
       creatorIp: sourceIp,
       userAgentSummary: row.user_agent_summary,
       riskScore: row.risk_score
@@ -913,7 +1222,9 @@ async function adminGetMessage(env, admin, messageId) {
     throw httpError(404, 'not_found', 'Message not found.');
   }
 
-  const plaintext = await decryptSafe(message, env);
+  const contentType = messageContentType(message);
+  const effectiveStatus = effectivePublicStatus(message);
+  const plaintext = contentType === 'text' ? await decryptSafe(message, env) : '';
   const sourceIp = message.creator_ip_ciphertext
     ? await decryptPackedString(message.creator_ip_ciphertext, env).catch(() => null)
     : null;
@@ -941,11 +1252,16 @@ async function adminGetMessage(env, admin, messageId) {
   return jsonResponse({
     message: {
       id: message.id,
-      status: effectivePublicStatus(message),
+      status: effectiveStatus,
       storedStatus: message.status,
+      contentType,
       burnMode: message.burn_mode,
       text: plaintext,
       textSize: message.text_size,
+      imageMimeType: message.image_mime_type,
+      imageSize: message.image_size,
+      imageDeletedAt: message.image_deleted_at,
+      imageAvailable: contentType === 'image' && imageIsReadable(message) && ['active', 'quarantined'].includes(effectiveStatus),
       createdAt: message.created_at,
       expiresAt: message.expires_at,
       openedAt: message.opened_at,
@@ -993,6 +1309,7 @@ async function adminDeleteMessage(request, env, admin, messageId) {
   const body = await readJson(request);
   const reason = optionalReason(body.reason);
   const now = new Date().toISOString();
+  const message = await getMessage(env, messageId);
 
   await env.DB.prepare(
     `UPDATE messages
@@ -1006,6 +1323,7 @@ async function adminDeleteMessage(request, env, admin, messageId) {
     .bind(now, reason, messageId)
     .run();
 
+  await deleteImageObjectBestEffort(env, message, now);
   await insertEvent(env, { messageId, eventType: 'deleted', actorType: 'admin', actorId: admin.id, reason });
 
   return jsonResponse({ ok: true, status: 'deleted' });
@@ -1022,6 +1340,7 @@ async function adminBatchDeleteMessages(request, env, admin) {
   }
 
   for (const messageId of ids) {
+    const message = await getMessage(env, messageId);
     await env.DB.prepare(
       `UPDATE messages
           SET status = 'deleted',
@@ -1034,6 +1353,7 @@ async function adminBatchDeleteMessages(request, env, admin) {
       .bind(now, reason || null, messageId)
       .run();
 
+    await deleteImageObjectBestEffort(env, message, now);
     await insertEvent(env, { messageId, eventType: 'deleted', actorType: 'admin', actorId: admin.id, reason });
   }
 
@@ -1257,7 +1577,7 @@ async function adminLiftBlockedSource(request, env, admin, blockId) {
 async function expireMessages(env) {
   const now = new Date().toISOString();
   const rows = await env.DB.prepare(
-      `SELECT id
+      `SELECT *
        FROM messages
       WHERE status IN ('active', 'reported')
         AND expires_at IS NOT NULL
@@ -1277,6 +1597,7 @@ async function expireMessages(env) {
       .bind(now, row.id)
       .run();
 
+    await deleteImageObjectBestEffort(env, row, now);
     await insertEvent(env, {
       messageId: row.id,
       eventType: 'expired',
@@ -1616,6 +1937,40 @@ async function getMessage(env, messageId) {
     .first();
 }
 
+function messageContentType(message) {
+  return message?.content_type === 'image' ? 'image' : 'text';
+}
+
+function imageIsReadable(message) {
+  return messageContentType(message) === 'image' && Boolean(message?.image_object_key) && !message.image_deleted_at;
+}
+
+function assertReadableImage(message) {
+  if (!imageIsReadable(message)) {
+    throw httpError(409, 'image_unavailable', 'Image is no longer available.');
+  }
+}
+
+function imageSharingEnabled(env) {
+  return Boolean(env.IMAGE_BUCKET);
+}
+
+function assertImageBucket(env) {
+  if (!imageSharingEnabled(env)) {
+    throw httpError(500, 'missing_image_bucket', 'R2 binding IMAGE_BUCKET is not configured.');
+  }
+}
+
+function maxImageBytes(env) {
+  return clampInteger(env.MAX_IMAGE_BYTES, 1, MAX_IMAGE_BYTES, MAX_IMAGE_BYTES);
+}
+
+function imageObjectKey(env, messageId) {
+  const rawPrefix = String(env.IMAGE_BUCKET_PREFIX || 'images/').replace(/^\/+/, '');
+  const prefix = rawPrefix && !rawPrefix.endsWith('/') ? `${rawPrefix}/` : rawPrefix;
+  return `${prefix}${messageId}`;
+}
+
 function requireMessageId(messageId) {
   const id = String(messageId || '').trim();
   if (!/^[a-zA-Z0-9_-]{10,80}$/.test(id)) {
@@ -1666,6 +2021,7 @@ async function markExpired(env, message, now) {
     .bind(now, message.id)
     .run();
 
+  await deleteImageObjectBestEffort(env, message, now);
   await insertEvent(env, {
     messageId: message.id,
     eventType: 'expired',
@@ -1705,6 +2061,17 @@ async function encryptString(value, env) {
   };
 }
 
+async function encryptBytes(bytes, env) {
+  const ivBytes = crypto.getRandomValues(new Uint8Array(12));
+  const key = await contentKey(env);
+  const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: ivBytes }, key, bytes);
+  return {
+    ciphertext: new Uint8Array(encrypted),
+    iv: bytesToBase64(ivBytes),
+    keyId: contentKeyId(env)
+  };
+}
+
 async function encryptPackedString(value, env) {
   const encrypted = await encryptString(value, env);
   return `${encrypted.iv}:${encrypted.ciphertext}`;
@@ -1722,6 +2089,20 @@ async function decryptString(ciphertext, iv, env) {
     base64ToBytes(ciphertext)
   );
   return new TextDecoder().decode(decrypted);
+}
+
+async function decryptBytes(ciphertext, iv, env) {
+  if (!ciphertext || !iv) {
+    return new Uint8Array();
+  }
+
+  const key = await contentKey(env);
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: base64ToBytes(iv) },
+    key,
+    ciphertext
+  );
+  return new Uint8Array(decrypted);
 }
 
 async function decryptPackedString(value, env) {
@@ -1755,6 +2136,10 @@ async function contentKey(env) {
 
 function contentKeyId(env) {
   return env.CONTENT_ENCRYPTION_KEY_ID || 'v1';
+}
+
+function imageTokenSecret(env) {
+  return env.IMAGE_TOKEN_SECRET || env.CONTENT_ENCRYPTION_KEY || developmentSecret(env, 'CONTENT_ENCRYPTION_KEY');
 }
 
 function developmentSecret(env, name) {
@@ -1869,6 +2254,79 @@ function normalizeBurnMode(mode) {
   throw httpError(400, 'invalid_burn_mode', 'Burn mode is required.');
 }
 
+function validateImageBytes(bytes, declaredType, env) {
+  if (!bytes.byteLength) {
+    throw httpError(400, 'empty_image', 'Image file is required.');
+  }
+
+  if (bytes.byteLength > maxImageBytes(env)) {
+    throw httpError(400, 'image_too_large', `Image must be ${maxImageBytes(env)} bytes or smaller.`);
+  }
+
+  const detectedType = detectImageMimeType(bytes);
+  if (!detectedType || !IMAGE_CONTENT_TYPES.has(detectedType)) {
+    throw httpError(400, 'unsupported_image_type', 'Only JPEG, PNG, WebP, and GIF images are supported.');
+  }
+
+  const normalizedDeclaredType = String(declaredType || '').toLowerCase();
+  if (normalizedDeclaredType && IMAGE_CONTENT_TYPES.has(normalizedDeclaredType) && normalizedDeclaredType !== detectedType) {
+    throw httpError(400, 'image_type_mismatch', 'Image file type does not match its content.');
+  }
+
+  return {
+    mimeType: detectedType,
+    size: bytes.byteLength
+  };
+}
+
+function detectImageMimeType(bytes) {
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return 'image/jpeg';
+  }
+
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    return 'image/png';
+  }
+
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return 'image/webp';
+  }
+
+  if (
+    bytes.length >= 6 &&
+    bytes[0] === 0x47 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x38 &&
+    (bytes[4] === 0x37 || bytes[4] === 0x39) &&
+    bytes[5] === 0x61
+  ) {
+    return 'image/gif';
+  }
+
+  return '';
+}
+
 function hasTimeLimitMode(mode) {
   return mode === 'time_limit' || mode === 'time_and_view';
 }
@@ -1964,6 +2422,31 @@ function summarizeText(text, status) {
   return text.replace(/\s+/g, ' ').trim().slice(0, 160);
 }
 
+function summarizeMessage(message, plaintext) {
+  if (messageContentType(message) === 'image') {
+    if (message.image_deleted_at || ['deleted', 'expired', 'burned'].includes(message.status)) {
+      return '[image returned to zero]';
+    }
+    return `[image] ${message.image_mime_type || 'unknown'} · ${formatBytes(message.image_size)}`;
+  }
+
+  return summarizeText(plaintext, message.status);
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (!bytes) {
+    return '0 B';
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function summarizeUserAgent(userAgent) {
   return String(userAgent || 'unknown').replace(/\s+/g, ' ').trim().slice(0, 180);
 }
@@ -1985,6 +2468,14 @@ async function readJson(request) {
     return await request.json();
   } catch (_error) {
     throw httpError(400, 'invalid_json', 'Request body must be valid JSON.');
+  }
+}
+
+async function readFormData(request) {
+  try {
+    return await request.formData();
+  } catch (_error) {
+    throw httpError(400, 'invalid_form_data', 'Request body must be valid form data.');
   }
 }
 

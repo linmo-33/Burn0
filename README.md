@@ -1,12 +1,14 @@
 # Burn0
 
-Burn0 是一个运行在 Cloudflare Workers 上的阅后即焚应用。用户写入消息后生成分享链接，消息会在达到打开次数、过期时间，或二者任一条件后自动销毁。
+Burn0 是一个运行在 Cloudflare Workers 上的阅后即焚应用。用户写入文本或图片后生成分享链接，内容会在达到打开次数、过期时间，或二者任一条件后自动销毁。
 
 ## 功能
 
 - 创建私密消息链接，不提供公开消息列表。
+- 支持文本分享；配置 R2 后可选支持单张图片分享。
 - 支持按打开次数、按过期时间、按次数或时间任一条件归零。
 - 使用 Cloudflare D1 保存加密消息、状态、举报、清理设置和封禁数据。
+- 使用可选 Cloudflare R2 保存加密后的图片对象，图片进入终态后会尽快删除对象。
 - 使用 Durable Objects 串行处理消息打开和计数。
 - 可选接入 Cloudflare Turnstile 人机验证。
 - 内置管理后台，支持消息查看、隔离、删除、举报处理、来源封禁和清理设置。
@@ -66,6 +68,8 @@ Fork 本仓库到自己的 GitHub 账号。
 | `ADMIN_PASSWORD` | Secret | 管理员密码 |
 | `ADMIN_SESSION_SECRET` | Secret | 管理会话签名密钥，至少 24 个字符 |
 | `TURNSTILE_SECRET_KEY` | Secret | Turnstile Secret Key，可选 |
+| `MAX_IMAGE_BYTES` | Text | 图片大小上限，可选，默认并最高为 `5242880` |
+| `IMAGE_BUCKET_PREFIX` | Text | R2 图片对象前缀，可选，默认 `images/` |
 
 `CONTENT_ENCRYPTION_KEY` 和 `IP_HASH_SECRET` 上线后应保持稳定，否则历史消息解密和来源哈希匹配会受到影响。
 
@@ -83,11 +87,46 @@ Cloudflare 控制台保存变量时，可能会提示把变更同步到 Wrangler
 
 绑定名必须是 `DB`，否则 Worker 无法访问数据库。
 
-#### 6. 首次访问
+#### 6. 可选：启用图片分享
+
+如果只需要文本分享，可以跳过本节；未配置 R2 时，前端不会显示图片入口，后端也会拒绝图片创建。
+
+启用图片分享需要创建 R2 bucket，并添加 Worker R2 binding：
+
+1. 进入 **Storage & Databases** → **R2**。
+2. 创建 bucket，例如 `burn0-images`。
+3. 回到 Worker 项目 **Settings** → **Bindings**。
+4. 点击 **Add binding**，选择 **R2 Bucket**。
+5. **Variable name** 填写 `IMAGE_BUCKET`，选择刚创建的 bucket 并保存。
+
+如果使用 `wrangler.jsonc` 管理绑定，可按需添加：
+
+```jsonc
+"r2_buckets": [
+  {
+    "binding": "IMAGE_BUCKET",
+    "bucket_name": "burn0-images"
+  }
+]
+```
+
+图片只支持 JPEG、PNG、WebP、GIF，不支持 SVG；单张图片最大 5MB。Worker 会先加密图片再写入 R2，D1 只保存生命周期和图片元数据。
+
+#### 7. 首次访问
 
 访问部署后的 Workers 域名。应用会在首次 API 请求时自动初始化 D1 表结构，创建消息、举报、管理员、清理设置和封禁相关数据表。
 
-本地数据库数据不会上传到 Cloudflare。`migrations/0001_init.sql` 保留为表结构参考和手动恢复入口。
+本地数据库数据不会上传到 Cloudflare。`migrations/` 保留为表结构参考和手动恢复入口。
+
+#### 已有生产库升级
+
+如果你的生产 D1 已经运行过旧版本，升级到支持图片分享的版本前，需要对远程 D1 执行新增列迁移：
+
+```powershell
+npm run db:migrate:remote
+```
+
+这会执行 `migrations/0002_image_content.sql`，为 `messages` 表增加图片元数据列。建议先在 Cloudflare D1 控制台确认近期备份/Time Travel 可用，再执行生产迁移。
 
 #### 自动部署未触发？快速排查
 

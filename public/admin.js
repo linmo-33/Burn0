@@ -49,7 +49,7 @@ const ADMIN_COPY = {
       empty: '暂无数据'
     },
     messagesTitle: '消息',
-    messagesCopy: '正文、状态和来源信号。',
+    messagesCopy: '正文、图片、状态和来源信号。',
     statuses: {
       all: '全部',
       active: '可访问',
@@ -128,12 +128,19 @@ const ADMIN_COPY = {
     accessUrl: '访问地址',
     copy: '复制',
     copied: '已复制',
+    imageUnavailable: '图片已归零或不可用。',
+    contentTypes: {
+      text: '文本',
+      image: '图片'
+    },
     quarantine: '隔离',
     delete: '删除',
     ban: '封禁来源',
     fields: {
+      content: '内容类型',
       mode: '归零方式',
       views: '查看次数',
+      imageSize: '图片大小',
       created: '创建时间',
       expires: '过期时间',
       opened: '打开时间',
@@ -208,7 +215,7 @@ const ADMIN_COPY = {
       empty: 'No data yet'
     },
     messagesTitle: 'Messages',
-    messagesCopy: 'Text, status, and source signals.',
+    messagesCopy: 'Text, images, status, and source signals.',
     statuses: {
       all: 'All',
       active: 'Active',
@@ -287,12 +294,19 @@ const ADMIN_COPY = {
     accessUrl: 'Access link',
     copy: 'Copy',
     copied: 'Copied',
+    imageUnavailable: 'Image has returned to zero or is unavailable.',
+    contentTypes: {
+      text: 'Text',
+      image: 'Image'
+    },
     quarantine: 'Quarantine',
     delete: 'Delete',
     ban: 'Ban source',
     fields: {
+      content: 'Content type',
       mode: 'Zero mode',
       views: 'Views',
+      imageSize: 'Image size',
       created: 'Created',
       expires: 'Expires',
       opened: 'Opened',
@@ -461,6 +475,7 @@ function renderAdminShell() {
 }
 
 function bindAdminShell() {
+  rootElement.addEventListener('click', closeDrawerOnOutsideClick, true);
   document.querySelector('.admin-nav').addEventListener('click', async (event) => {
     const button = event.target.closest('[data-section]');
     if (!button) {
@@ -471,6 +486,7 @@ function bindAdminShell() {
 }
 
 async function loadSection(section) {
+  closeDrawer();
   activeSection = section;
   updateActiveNav();
 
@@ -1032,7 +1048,7 @@ async function openMessageDrawer(messageId) {
       <button class="ghost-button" id="closeDrawer" type="button">${copy.close}</button>
     </div>
     <div class="drawer-body">
-      <div class="message-body admin-message-body">${escapeHtml(message.text || '[content unavailable]')}</div>
+      ${messageContentBlock(message, copy)}
       <div class="field">
         <span class="label">${copy.accessUrl}</span>
         <div class="share-row">
@@ -1046,8 +1062,10 @@ async function openMessageDrawer(messageId) {
         <button class="secondary-button" data-action="ban" data-id="${escapeAttr(message.id)}" type="button">${copy.ban}</button>
       </div>
       <dl class="kv-grid">
+        <dt>${copy.fields.content}</dt><dd>${contentTypeLabel(message.contentType, copy)}</dd>
         <dt>${copy.fields.mode}</dt><dd>${formatBurnMode(message.burnMode)}</dd>
         <dt>${copy.fields.views}</dt><dd>${formatViews(message.viewCount, message.maxViews)}</dd>
+        <dt>${copy.fields.imageSize}</dt><dd>${message.contentType === 'image' ? `${escapeHtml(message.imageMimeType || '')} · ${formatBytes(message.imageSize)}` : ''}</dd>
         <dt>${copy.fields.created}</dt><dd>${formatDate(message.createdAt)}</dd>
         <dt>${copy.fields.expires}</dt><dd>${formatDate(message.expiresAt)}</dd>
         <dt>${copy.fields.opened}</dt><dd>${formatDate(message.openedAt)}</dd>
@@ -1213,8 +1231,41 @@ async function deleteSelectedReports(container) {
 
 function closeDrawer() {
   const drawer = document.getElementById('messageDrawer');
+  if (!drawer) {
+    return;
+  }
   drawer.classList.remove('is-open');
   drawer.innerHTML = '';
+}
+
+function closeDrawerOnOutsideClick(event) {
+  const drawer = document.getElementById('messageDrawer');
+  if (!drawer?.classList.contains('is-open') || drawer.contains(event.target)) {
+    return;
+  }
+
+  closeDrawer();
+}
+
+function messageContentBlock(message, copy) {
+  if (message.contentType === 'image') {
+    if (!message.imageAvailable) {
+      return `<div class="notice">${copy.imageUnavailable}</div>`;
+    }
+
+    return `
+      <figure class="message-image-frame admin-message-image">
+        <img src="/api/admin/messages/${encodeURIComponent(message.id)}/image" alt="${escapeAttr(copy.contentTypes.image)}">
+        <figcaption class="meta">${escapeHtml(message.imageMimeType || '')} · ${formatBytes(message.imageSize)}</figcaption>
+      </figure>
+    `;
+  }
+
+  return `<div class="message-body admin-message-body">${escapeHtml(message.text || '[content unavailable]')}</div>`;
+}
+
+function contentTypeLabel(contentType, copy = tr()) {
+  return copy.contentTypes[contentType] || copy.contentTypes.text;
 }
 
 function renderAccessError(error) {
@@ -1487,6 +1538,20 @@ function formatDate(value) {
     hour: '2-digit',
     minute: '2-digit'
   });
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (!bytes) {
+    return '0 B';
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function debounce(callback, delay) {

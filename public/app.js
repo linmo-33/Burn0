@@ -2,6 +2,8 @@ import { icon } from '/icons.js';
 
 const root = document.getElementById('root');
 const MAX_TEXT_LENGTH = 10000;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/gif';
 const LANG_KEY = 'burn0_lang';
 let language = localStorage.getItem(LANG_KEY) || 'zh';
 let adminTriggerCount = 0;
@@ -10,6 +12,8 @@ let publicConfigPromise;
 let turnstileScriptPromise;
 let turnstileWidgetId = null;
 let turnstileToken = '';
+let imageComposerConfig = { imageSharingEnabled: false, maxImageBytes: MAX_IMAGE_BYTES };
+let imagePreviewUrl = '';
 
 const USER_COPY = {
   zh: {
@@ -25,8 +29,15 @@ const USER_COPY = {
     createEyebrow: '创建',
     createTitle: '创建归零链接',
     composerNote: '归零链接：限时、限次。',
+    contentType: '内容类型',
+    contentText: '文本',
+    contentImage: '图片',
     messageText: '消息内容',
     textareaPlaceholder: '写下要发送的内容。',
+    imageFile: '图片内容',
+    imagePlaceholder: '选择一张 JPEG、PNG、WebP 或 GIF 图片。',
+    chooseImage: '选择图片',
+    removeImage: '移除',
     burnMode: '归零方式',
     expiry: '过期时间',
     viewLimit: '打开次数',
@@ -35,6 +46,9 @@ const USER_COPY = {
     createButton: '创建归零链接',
     creating: '创建中...',
     required: '请填写消息内容。',
+    imageRequired: '请选择图片。',
+    imageTooLarge: (max) => `图片不能超过 ${formatBytes(max)}。`,
+    imageUnsupported: '仅支持 JPEG、PNG、WebP、GIF 图片。',
     verifyHuman: '验证',
     verificationRequired: '请先完成人机验证。',
     verificationConfigError: '人机验证配置未完成。',
@@ -49,8 +63,10 @@ const USER_COPY = {
     cannotOpen: '没有可读取的内容。',
     openedEyebrow: 'Burn0 · 已打开',
     openedTitle: '消息内容',
+    openedImageTitle: '图片内容',
     openedLede: '内容只在当前窗口显示，关闭后可能无法再次读取。',
     openedBurned: '本次打开后，这条链接已归零。',
+    imageLoadError: '图片不可读取。',
     burnedTitle: '已归零',
     burnedCopy: '内容已归零，不再显示。',
     expiredCopy: '时间已归零，不再显示。',
@@ -104,8 +120,15 @@ const USER_COPY = {
     createEyebrow: 'Create',
     createTitle: 'Create Zero Link',
     composerNote: 'Zero Link: limited by time, opens, then 0.',
+    contentType: 'Content type',
+    contentText: 'Text',
+    contentImage: 'Image',
     messageText: 'Message',
     textareaPlaceholder: 'Write what you want to send.',
+    imageFile: 'Image',
+    imagePlaceholder: 'Choose a JPEG, PNG, WebP, or GIF image.',
+    chooseImage: 'Choose image',
+    removeImage: 'Remove',
     burnMode: 'Zero mode',
     expiry: 'Expiry',
     viewLimit: 'Open limit',
@@ -114,6 +137,9 @@ const USER_COPY = {
     createButton: 'Create Zero Link',
     creating: 'Creating...',
     required: 'Message text is required.',
+    imageRequired: 'Choose an image first.',
+    imageTooLarge: (max) => `Image must be ${formatBytes(max)} or smaller.`,
+    imageUnsupported: 'Only JPEG, PNG, WebP, and GIF images are supported.',
     verifyHuman: 'Verification',
     verificationRequired: 'Complete verification first.',
     verificationConfigError: 'Verification is not configured.',
@@ -128,8 +154,10 @@ const USER_COPY = {
     cannotOpen: 'This link can no longer be opened.',
     openedEyebrow: 'Burn0 · Opened',
     openedTitle: 'Message content',
+    openedImageTitle: 'Image content',
     openedLede: 'This content is only shown in this window and may not be readable again.',
     openedBurned: 'This link returned to zero after this open.',
+    imageLoadError: 'Image cannot be read.',
     burnedTitle: 'Returned to zero',
     burnedCopy: 'No readable content remains here.',
     expiredCopy: 'Time ran out. The content returned to zero.',
@@ -229,6 +257,7 @@ async function route() {
 function renderHome() {
   const copy = t();
   resetTurnstileWidget();
+  resetImagePreview();
   root.innerHTML = `
     <div class="site-shell">
       ${topbar()}
@@ -258,12 +287,37 @@ function renderHome() {
           </div>
 
           <form id="createForm">
-            <div class="field">
+            <div class="field" id="contentTypeField" hidden>
+              <span class="label">${copy.contentType}</span>
+              <div class="segmented content-segmented" role="group" aria-label="${copy.contentType}">
+                ${segment('contentType', 'text', copy.contentText, true)}
+                ${segment('contentType', 'image', copy.contentImage)}
+              </div>
+            </div>
+
+            <div class="field" id="textContentField">
               <div class="field-row">
                 <label class="label" for="messageText">${copy.messageText}</label>
                 <span class="counter" id="charCounter">0 / ${MAX_TEXT_LENGTH}</span>
               </div>
               <textarea id="messageText" maxlength="${MAX_TEXT_LENGTH}" spellcheck="true" autocomplete="off" placeholder="${copy.textareaPlaceholder}"></textarea>
+            </div>
+
+            <div class="field" id="imageContentField" hidden>
+              <div class="field-row">
+                <label class="label" for="imageFile">${copy.imageFile}</label>
+                <span class="counter" id="imageCounter">${formatBytes(MAX_IMAGE_BYTES)}</span>
+              </div>
+              <input class="sr-only" id="imageFile" type="file" accept="${IMAGE_ACCEPT}">
+              <div class="image-picker" id="imagePicker">
+                <div class="image-preview is-empty" id="imagePreview">
+                  <span>${copy.imagePlaceholder}</span>
+                </div>
+                <div class="action-row image-actions">
+                  <label class="secondary-button" for="imageFile">${icon('upload')}<span class="btn-label">${copy.chooseImage}</span></label>
+                  <button class="ghost-button" id="removeImage" type="button" disabled>${icon('x', { size: 16 })}<span class="btn-label">${copy.removeImage}</span></button>
+                </div>
+              </div>
             </div>
 
             <div class="field">
@@ -321,11 +375,77 @@ function bindComposer() {
   bindSegments('expiry', 'customExpiry');
   bindSegments('views', 'customViews');
   bindBurnMode();
+  bindContentType();
+  bindImagePicker();
+  initImageComposer();
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     await createMessage();
   });
+}
+
+function bindContentType() {
+  const buttons = Array.from(document.querySelectorAll('[data-group="contentType"]'));
+  const refresh = () => {
+    const isImage = selectedContentType() === 'image';
+    document.getElementById('textContentField').hidden = isImage;
+    document.getElementById('imageContentField').hidden = !isImage;
+  };
+
+  for (const button of buttons) {
+    button.addEventListener('click', () => {
+      for (const item of buttons) {
+        item.classList.toggle('is-active', item === button);
+      }
+      refresh();
+    });
+  }
+
+  refresh();
+}
+
+function bindImagePicker() {
+  const input = document.getElementById('imageFile');
+  const remove = document.getElementById('removeImage');
+  if (!input || !remove) {
+    return;
+  }
+
+  input.addEventListener('change', () => {
+    const file = input.files?.[0] || null;
+    if (!file) {
+      resetImagePreview();
+      return;
+    }
+    updateImagePreview(file);
+  });
+
+  remove.addEventListener('click', () => {
+    input.value = '';
+    resetImagePreview();
+  });
+}
+
+async function initImageComposer() {
+  const field = document.getElementById('contentTypeField');
+  const counter = document.getElementById('imageCounter');
+  if (!field || !counter) {
+    return;
+  }
+
+  try {
+    const config = await getPublicConfig();
+    imageComposerConfig = {
+      imageSharingEnabled: Boolean(config.imageSharingEnabled),
+      maxImageBytes: Number(config.maxImageBytes || MAX_IMAGE_BYTES)
+    };
+  } catch (_error) {
+    imageComposerConfig = { imageSharingEnabled: false, maxImageBytes: MAX_IMAGE_BYTES };
+  }
+
+  counter.textContent = formatBytes(imageComposerConfig.maxImageBytes);
+  field.hidden = !imageComposerConfig.imageSharingEnabled;
 }
 
 function bindSegments(group, customInputId) {
@@ -370,7 +490,9 @@ async function createMessage() {
   const copy = t();
   const button = document.getElementById('createButton');
   const result = document.getElementById('createResult');
+  const contentType = selectedContentType();
   const text = document.getElementById('messageText').value.trim();
+  const imageFile = document.getElementById('imageFile')?.files?.[0] || null;
   const burnMode = selectedBurnMode();
   const payload = { text, burnMode };
   if (burnMode === 'time_limit' || burnMode === 'time_and_view') {
@@ -380,9 +502,16 @@ async function createMessage() {
     payload.maxViews = selectedNumber('views', 'customViews', 1, 1, 20);
   }
 
-  if (!text) {
+  if (contentType === 'text' && !text) {
     showResult(result, `<div class="notice is-danger">${copy.required}</div>`);
     return;
+  }
+  if (contentType === 'image') {
+    const imageError = validateSelectedImage(imageFile);
+    if (imageError) {
+      showResult(result, `<div class="notice is-danger">${escapeHtml(imageError)}</div>`);
+      return;
+    }
   }
 
   const turnstileConfig = await getPublicConfig();
@@ -396,10 +525,10 @@ async function createMessage() {
   button.textContent = copy.creating;
 
   try {
-    const response = await api('/api/messages', {
-      method: 'POST',
-      body: JSON.stringify({ ...payload, turnstileToken: token })
-    });
+    const body = contentType === 'image'
+      ? imageCreateForm(payload, imageFile, token)
+      : JSON.stringify({ ...payload, turnstileToken: token });
+    const response = await api('/api/messages', { method: 'POST', body });
 
     showResult(result, `
       <div class="notice">
@@ -416,6 +545,10 @@ async function createMessage() {
       await navigator.clipboard.writeText(response.shareUrl);
       document.getElementById('copyLink').innerHTML = `${icon('check')}<span class="btn-label">${copy.copied}</span>`;
     });
+    if (contentType === 'image') {
+      document.getElementById('imageFile').value = '';
+      resetImagePreview();
+    }
   } catch (error) {
     showResult(result, `<div class="notice is-danger">${escapeHtml(error.message)}</div>`);
   } finally {
@@ -463,22 +596,48 @@ async function openMessage(id, panel) {
 function renderOpenedMessage(panel, id, message) {
   const copy = t();
   const text = message.text || '';
+  const isImage = message.contentType === 'image';
   panel.classList.add('opened-message');
   panel.innerHTML = `
     <div class="message-heading">
       <p class="eyebrow">${copy.openedEyebrow}</p>
       <p class="message-copy">${escapeHtml(openedMessageSummary(message))}</p>
     </div>
-    <article class="message-body" aria-label="${copy.openedTitle}">${escapeHtml(text)}</article>
+    ${isImage ? openedImage(message) : `<article class="message-body" aria-label="${copy.openedTitle}">${escapeHtml(text)}</article>`}
     <div class="action-row message-actions">
       <a class="secondary-button" href="/">${icon('plus')}<span class="btn-label">${copy.createAnother}</span></a>
-      <button class="secondary-button" type="button" id="copyMessage">${icon('copy')}<span class="btn-label">${copy.copy}</span></button>
+      ${isImage ? '' : `<button class="secondary-button" type="button" id="copyMessage">${icon('copy')}<span class="btn-label">${copy.copy}</span></button>`}
       <button class="ghost-button" type="button" id="toggleReport">${icon('flag', { size: 16 })}<span class="btn-label">${copy.reportLink}</span></button>
     </div>
     ${reportBox(id)}
   `;
   bindCopyMessage(panel, text);
+  bindOpenedImage(panel);
   bindReport(panel, id);
+}
+
+function openedImage(message) {
+  const copy = t();
+  const url = message.image?.url || '';
+  return `
+    <figure class="message-image-frame">
+      <img src="${escapeAttr(url)}" alt="${escapeAttr(copy.openedImageTitle)}">
+      <figcaption class="meta">${escapeHtml(message.image?.mimeType || '')} · ${formatBytes(message.image?.size || 0)}</figcaption>
+    </figure>
+  `;
+}
+
+function bindOpenedImage(panel) {
+  const copy = t();
+  const image = panel.querySelector('.message-image-frame img');
+  if (!image) {
+    return;
+  }
+
+  image.addEventListener('error', () => {
+    const frame = image.closest('.message-image-frame');
+    frame.innerHTML = `<div class="notice is-danger">${copy.imageLoadError}</div>`;
+  });
 }
 
 function bindReport(panel, id) {
@@ -639,6 +798,84 @@ function selectedBurnMode() {
   return active?.dataset.value || 'view_limit';
 }
 
+function selectedContentType() {
+  if (!imageComposerConfig.imageSharingEnabled) {
+    return 'text';
+  }
+  const active = document.querySelector('[data-group="contentType"].is-active');
+  return active?.dataset.value === 'image' ? 'image' : 'text';
+}
+
+function validateSelectedImage(file) {
+  const copy = t();
+  if (!file) {
+    return copy.imageRequired;
+  }
+
+  if (file.size > imageComposerConfig.maxImageBytes) {
+    return copy.imageTooLarge(imageComposerConfig.maxImageBytes);
+  }
+
+  if (!IMAGE_ACCEPT.split(',').includes(file.type)) {
+    return copy.imageUnsupported;
+  }
+
+  return '';
+}
+
+function imageCreateForm(payload, file, token) {
+  const form = new FormData();
+  form.append('contentType', 'image');
+  form.append('burnMode', payload.burnMode);
+  if (payload.expiresInSeconds) {
+    form.append('expiresInSeconds', String(payload.expiresInSeconds));
+  }
+  if (payload.maxViews) {
+    form.append('maxViews', String(payload.maxViews));
+  }
+  if (token) {
+    form.append('turnstileToken', token);
+  }
+  form.append('image', file);
+  return form;
+}
+
+function updateImagePreview(file) {
+  const preview = document.getElementById('imagePreview');
+  const remove = document.getElementById('removeImage');
+  if (!preview || !remove) {
+    return;
+  }
+
+  if (imagePreviewUrl) {
+    URL.revokeObjectURL(imagePreviewUrl);
+  }
+  imagePreviewUrl = URL.createObjectURL(file);
+  preview.classList.remove('is-empty');
+  preview.innerHTML = `
+    <img src="${escapeAttr(imagePreviewUrl)}" alt="">
+    <span>${escapeHtml(file.name)} · ${formatBytes(file.size)}</span>
+  `;
+  remove.disabled = false;
+}
+
+function resetImagePreview() {
+  const copy = t();
+  const preview = document.getElementById('imagePreview');
+  const remove = document.getElementById('removeImage');
+  if (imagePreviewUrl) {
+    URL.revokeObjectURL(imagePreviewUrl);
+    imagePreviewUrl = '';
+  }
+  if (preview) {
+    preview.classList.add('is-empty');
+    preview.innerHTML = `<span>${copy.imagePlaceholder}</span>`;
+  }
+  if (remove) {
+    remove.disabled = true;
+  }
+}
+
 function selectedExpirySeconds() {
   const expiryValue = selectedRawValue('expiry', 'customExpiry');
   return expiryValue.isCustom
@@ -675,6 +912,17 @@ function clampNumber(value, min, max, fallback) {
     return fallback;
   }
   return Math.min(max, Math.max(min, value));
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function limitSummary(message) {
@@ -759,7 +1007,7 @@ async function initTurnstile() {
     sitekey: config.turnstileSiteKey,
     theme: 'dark',
     size: 'flexible',
-    language: language === 'zh' ? 'zh-CN' : 'en',
+    language: language === 'zh' ? 'zh-cn' : 'en',
     callback: (token) => {
       turnstileToken = token;
     },
@@ -831,12 +1079,14 @@ function resetTurnstileWidget() {
 }
 
 async function api(path, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (!(options.body instanceof FormData) && !headers['content-type']) {
+    headers['content-type'] = 'application/json';
+  }
+
   const response = await fetch(path, {
     ...options,
-    headers: {
-      'content-type': 'application/json',
-      ...(options.headers || {})
-    }
+    headers
   });
   const payload = await response.json().catch(() => ({}));
 
