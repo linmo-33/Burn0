@@ -428,6 +428,12 @@ select:focus {
   border-style: solid;
 }
 
+.image-preview:focus-visible {
+  border-color: rgba(255, 106, 26, 0.7);
+  box-shadow: var(--focus);
+  outline: none;
+}
+
 .image-actions {
   justify-content: space-between;
 }

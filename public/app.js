@@ -35,7 +35,8 @@ const USER_COPY = {
     messageText: '消息内容',
     textareaPlaceholder: '写下要发送的内容。',
     imageFile: '图片内容',
-    imagePlaceholder: '选择一张 JPEG、PNG、WebP 或 GIF 图片。',
+    imagePlaceholder: '选择或粘贴一张 JPEG、PNG、WebP 或 GIF 图片。',
+    imagePasteLabel: '图片选择框，支持粘贴图片',
     chooseImage: '选择图片',
     removeImage: '移除',
     burnMode: '归零方式',
@@ -126,7 +127,8 @@ const USER_COPY = {
     messageText: 'Message',
     textareaPlaceholder: 'Write what you want to send.',
     imageFile: 'Image',
-    imagePlaceholder: 'Choose a JPEG, PNG, WebP, or GIF image.',
+    imagePlaceholder: 'Choose or paste a JPEG, PNG, WebP, or GIF image.',
+    imagePasteLabel: 'Image picker, paste image supported',
     chooseImage: 'Choose image',
     removeImage: 'Remove',
     burnMode: 'Zero mode',
@@ -310,7 +312,7 @@ function renderHome() {
               </div>
               <input class="sr-only" id="imageFile" type="file" accept="${IMAGE_ACCEPT}">
               <div class="image-picker" id="imagePicker">
-                <div class="image-preview is-empty" id="imagePreview">
+                <div class="image-preview is-empty" id="imagePreview" tabindex="0" aria-label="${copy.imagePasteLabel}">
                   <span>${copy.imagePlaceholder}</span>
                 </div>
                 <div class="action-row image-actions">
@@ -408,7 +410,8 @@ function bindContentType() {
 function bindImagePicker() {
   const input = document.getElementById('imageFile');
   const remove = document.getElementById('removeImage');
-  if (!input || !remove) {
+  const picker = document.getElementById('imagePicker');
+  if (!input || !remove || !picker) {
     return;
   }
 
@@ -418,6 +421,17 @@ function bindImagePicker() {
       resetImagePreview();
       return;
     }
+    updateImagePreview(file);
+  });
+
+  picker.addEventListener('paste', (event) => {
+    const file = clipboardImageFile(event.clipboardData);
+    if (!file) {
+      return;
+    }
+
+    event.preventDefault();
+    setImageInputFile(input, file);
     updateImagePreview(file);
   });
 
@@ -821,6 +835,46 @@ function validateSelectedImage(file) {
   }
 
   return '';
+}
+
+function clipboardImageFile(clipboardData) {
+  const files = Array.from(clipboardData?.files || []);
+  const directFile = files.find((file) => file.type?.startsWith('image/'));
+  if (directFile) {
+    return namedClipboardImageFile(directFile);
+  }
+
+  const items = Array.from(clipboardData?.items || []);
+  const imageItem = items.find((item) => item.kind === 'file' && item.type?.startsWith('image/'));
+  const itemFile = imageItem?.getAsFile();
+  return itemFile ? namedClipboardImageFile(itemFile) : null;
+}
+
+function namedClipboardImageFile(file) {
+  if (file.name) {
+    return file;
+  }
+
+  const extension = imageExtension(file.type);
+  return new File([file], `pasted-image-${Date.now()}.${extension}`, {
+    type: file.type,
+    lastModified: file.lastModified || Date.now()
+  });
+}
+
+function imageExtension(mimeType) {
+  return {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif'
+  }[mimeType] || 'bin';
+}
+
+function setImageInputFile(input, file) {
+  const transfer = new DataTransfer();
+  transfer.items.add(file);
+  input.files = transfer.files;
 }
 
 function imageCreateForm(payload, file, token) {
