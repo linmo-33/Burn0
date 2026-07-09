@@ -44,6 +44,14 @@
       "new_sqlite_classes": ["MessageGate"]
     }
   ],
+  // 可选：启用图片分享时，在自己的 fork 中取消注释并改成自己的 R2 bucket 名。
+  // 未启用时保持注释，应用只支持文本分享。
+  "r2_buckets": [
+    {
+      "binding": "IMAGE_BUCKET",
+      "bucket_name": "burn0-images"
+    }
+   ],
   "triggers": {
     "crons": ["*/10 * * * *"]
   }
