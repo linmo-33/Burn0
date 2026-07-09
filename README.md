@@ -75,7 +75,7 @@ Fork 本仓库到自己的 GitHub 账号。
 
 Cloudflare 控制台保存变量时，可能会提示把变更同步到 Wrangler 配置文件。这个项目开启了 `keep_vars`，部署时会保留 Cloudflare Dashboard 中已有的 Text 变量；`wrangler.jsonc` 中只保留稳定默认值 `APP_ENV=production`。`TURNSTILE_SITE_KEY` 建议只在 Cloudflare Dashboard 中配置，所有 **Secret** 都不要写入 `wrangler.jsonc`，生产环境在 Cloudflare Dashboard 中保存，本地开发写入 `.dev.vars`。
 
-如果你 fork 后只通过 Cloudflare Dashboard 部署，通常不需要修改仓库里的 `wrangler.jsonc`。
+如果你 fork 后只使用文本分享，通常不需要修改仓库里的 `wrangler.jsonc`。如果启用图片分享，需要按下方 R2 说明把绑定写入自己的 `wrangler.jsonc`，不要只在 Dashboard 手动添加绑定。
 
 #### 5. 绑定 D1 数据库
 
@@ -91,15 +91,14 @@ Cloudflare 控制台保存变量时，可能会提示把变更同步到 Wrangler
 
 如果只需要文本分享，可以跳过本节；未配置 R2 时，前端不会显示图片入口，后端也会拒绝图片创建。
 
-启用图片分享需要创建 R2 bucket，并添加 Worker R2 binding：
+启用图片分享需要创建 R2 bucket，并把 Worker R2 binding 写入自己的 `wrangler.jsonc`：
 
 1. 进入 **Storage & Databases** → **R2**。
 2. 创建 bucket，例如 `burn0-images`。
-3. 回到 Worker 项目 **Settings** → **Bindings**。
-4. 点击 **Add binding**，选择 **R2 Bucket**。
-5. **Variable name** 填写 `IMAGE_BUCKET`，选择刚创建的 bucket 并保存。
+3. 在自己的 fork 中打开 `wrangler.jsonc`，找到已经注释的 `r2_buckets` 模板。
+4. 取消注释，并把 `bucket_name` 改成自己的 R2 bucket 名。
 
-如果使用 `wrangler.jsonc` 管理绑定，可按需添加：
+示例：
 
 ```jsonc
 "r2_buckets": [
@@ -109,6 +108,8 @@ Cloudflare 控制台保存变量时，可能会提示把变更同步到 Wrangler
   }
 ]
 ```
+
+`binding` 必须保持为 `IMAGE_BUCKET`，因为 Worker 代码通过 `env.IMAGE_BUCKET` 访问 R2。使用 `npm run deploy`、`npx wrangler deploy` 或 Workers Builds 时，Wrangler 配置会作为部署配置来源；如果只在 Cloudflare Dashboard 手动添加 R2 binding，后续部署可能会移除该绑定。
 
 图片只支持 JPEG、PNG、WebP、GIF，不支持 SVG；单张图片最大 5MB。Worker 会先加密图片再写入 R2，D1 只保存生命周期和图片元数据。
 
