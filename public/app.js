@@ -1,7 +1,7 @@
 import { icon } from '/icons.js';
 
 const root = document.getElementById('root');
-const MAX_TEXT_LENGTH = 10000;
+const MAX_TEXT_LENGTH = 15000;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/gif';
 const LANG_KEY = 'burn0_lang';
